@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { XMLParser } from "../packages/utils/src/xml";
 
 const SITE_URL = "https://yequ172672.github.io/oh-my-pi-cn/";
+const GOOGLE_SITE_VERIFICATION = "_O1hc0Fz5pr_uNHD5G8G0q9Vbt_qbra4N04F-plJ4x8";
 const repoRoot = path.resolve(import.meta.dir, "..");
 const siteRoot = path.join(repoRoot, "website");
 
@@ -133,6 +134,10 @@ async function validateHtml(): Promise<void> {
 	);
 	invariant(snapshot.canonical === SITE_URL, `canonical 必须为 ${SITE_URL}`);
 	invariant(snapshot.meta.get("description")?.includes("omp-cn"), "meta description 必须包含 omp-cn");
+	invariant(
+		snapshot.meta.get("google-site-verification") === GOOGLE_SITE_VERIFICATION,
+		"Google Search Console 所有权验证标记缺失或错误",
+	);
 	invariant(snapshot.meta.get("og:url") === SITE_URL, "Open Graph URL 与 canonical 不一致");
 	invariant(snapshot.meta.get("og:title")?.includes("Oh My Pi 中文版"), "Open Graph 标题缺少中文项目名");
 	invariant(snapshot.meta.get("og:image") === `${SITE_URL}og-social.jpg`, "Open Graph 图片必须使用站点绝对 URL");

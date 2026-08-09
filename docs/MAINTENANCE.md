@@ -213,6 +213,7 @@ git diff --check
 - root、coding-agent、fork 打包清单和可选 Homebrew 元数据的 homepage 统一指向项目网站，repository/bugs 仍指向 GitHub；网站域名变化时同步更新对应合同测试。
 - `website/` 是无构建依赖的静态站点，发布入口为 `.github/workflows/pages.yml`，只上传该目录，不能把仓库、凭据或构建产物整体发布。提交前及 workflow 中运行 `bun run ci:site`，验证 HTML 元数据、结构化数据、内部资源、YAML、sitemap 和社交图合同。
 - 站点 canonical、Open Graph、JSON-LD、`robots.txt` 和 `sitemap.xml` 统一指向 `https://yequ172672.github.io/oh-my-pi-cn/`；更换域名时必须一次性更新并验证全部入口。
+- 首页的 `google-site-verification` 标记用于维持 Google Search Console 所有权，不能在上游同步或页面改版时删除；如需轮换，必须同步更新站点验证脚本并重新完成在线验证。
 - Pages workflow 成功后才能把 GitHub Homepage 改为站点 URL。站点尚未部署、部署失败或返回 404 时不得提前制造公开死链。
 - 每次站点变更检查桌面和窄屏内容层级、键盘焦点、安装命令、贡献链接、社交预览图和外部链接。公开页面只面向最终用户与贡献者，不写入内部制作过程。
 
