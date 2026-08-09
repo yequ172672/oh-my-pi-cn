@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { setLanguage } from "@oh-my-pi/pi-coding-agent/i18n";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -26,6 +27,7 @@ describe("/handoff command", () => {
 	});
 
 	afterEach(() => {
+		setLanguage("en");
 		vi.restoreAllMocks();
 	});
 
@@ -124,6 +126,40 @@ describe("/handoff command", () => {
 
 		expect(showError).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledWith("Handoff failed: Deepseek stream stalled");
+	});
+
+	it.each([
+		["Handoff generation produced no content", "交接失败：未生成任何内容"],
+		["Handoff aborted by session", "交接失败：交接已由会话中止"],
+	])("localizes the known handoff failure %s", async (message, expected) => {
+		setLanguage("zh-CN");
+		const showError = vi.fn();
+		const statusContainer = createContainer();
+		const ctx = {
+			sessionManager: {
+				getEntries: () => [{ type: "message" }, { type: "message" }],
+			},
+			session: {
+				handoff: vi.fn(async () => {
+					throw new Error(message);
+				}),
+				abortHandoff: vi.fn(),
+			},
+			loadingAnimation: undefined,
+			statusContainer,
+			chatContainer: createContainer(),
+			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
+			editor: { onEscape: vi.fn() },
+			showError,
+			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+
+		await controller.handleHandoffCommand();
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledWith(expected);
 	});
 
 	it("refuses to hand off while a response is streaming", async () => {

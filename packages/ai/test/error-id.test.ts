@@ -74,6 +74,20 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("classifies Codex cyber approval denials as account-scoped policy blocks", () => {
+		const assistant = message({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-5.6-sol",
+			errorMessage:
+				"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("keeps raw status fallback unclassified", () => {
 		const id = 503;
 		expect(AIError.is(id, AIError.Flag.Class)).toBe(false);

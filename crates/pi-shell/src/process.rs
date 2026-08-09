@@ -7,17 +7,14 @@ use std::{
 
 use anyhow::Result;
 use parking_lot::Mutex;
+/// Current state of a process reference.
+///
+/// Defined in `pi-builtins` alongside the process-table snapshots its process
+/// builtins read, and re-exported here so this module — and `pi-natives`
+/// through it — keeps one status type for both concerns.
+pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
-
-/// Current state of a process reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessStatus {
-	/// The referenced process is still running.
-	Running,
-	/// The referenced process has exited or is no longer observable.
-	Exited,
-}
 
 #[cfg(target_os = "linux")]
 mod platform {

@@ -25,6 +25,8 @@ export const Flag = {
 	MalformedFunctionCall: 0x0020_0000,
 	ProviderFinishError: 0x0040_0000,
 	ContentBlocked: 0x0000_8000,
+	/** Account-scoped provider policy denial that may succeed with another credential. */
+	AccountPolicy: 0x0000_4000,
 	ContextOverflow: 0x0080_0000,
 	AuthFailed: 0x0100_0000,
 	SilentAbort: 0x0200_0000,
@@ -49,6 +51,7 @@ const KIND_MASK =
 	Flag.MalformedFunctionCall |
 	Flag.ProviderFinishError |
 	Flag.ContentBlocked |
+	Flag.AccountPolicy |
 	Flag.ContextOverflow |
 	Flag.AuthFailed |
 	Flag.SilentAbort |
@@ -102,6 +105,7 @@ const AUTH_FAILURE_PATTERN =
 const MALFORMED_FUNCTION_CALL_PATTERN = /\bmalformed.?function.?call\b/i;
 const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reason|finish_reason:\s*error)\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
+const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 const STALE_RESPONSE_ITEM_PATTERNS = [/\bItem with id ['"][^'"]+['"] not found\.?/i, /previous[ _]?response/i] as const;
 const STALE_RESPONSE_ITEM_DETAIL_PATTERN = /not[ _]?found|invalid|expired|stale|zero[ _-]?data[ _-]?retention/i;
 /**
@@ -194,6 +198,7 @@ const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.MalformedFunctionCall, "malformed-function-call"],
 	[Flag.ProviderFinishError, "provider-finish-error"],
 	[Flag.ContentBlocked, "content-blocked"],
+	[Flag.AccountPolicy, "account-policy"],
 	[Flag.ContextOverflow, "context-overflow"],
 	[Flag.AuthFailed, "auth-failed"],
 	[Flag.SilentAbort, "silent-abort"],
@@ -336,6 +341,7 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
+		if (ACCOUNT_POLICY_PATTERN.test(errorMessage)) kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;
 
 		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
@@ -397,6 +403,9 @@ export function classify(error: unknown, api?: Api): number {
 
 			if ("errorId" in link && typeof (link as { errorId: unknown }).errorId === "number") {
 				kinds |= (link as { errorId: number }).errorId & KIND_MASK;
+			}
+			if ("code" in link && typeof link.code === "string" && ACCOUNT_POLICY_PATTERN.test(link.code)) {
+				kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 			}
 		}
 
@@ -473,6 +482,11 @@ export function classify(error: unknown, api?: Api): number {
  */
 export function isUsageLimit(error: unknown, api?: Api): boolean {
 	return is(classify(error, api), Flag.UsageLimit);
+}
+
+/** Whether an upstream rejection is an account-scoped policy denial worth retrying with a sibling credential. */
+export function isAccountPolicyError(error: unknown, api?: Api): boolean {
+	return is(classify(error, api), Flag.AccountPolicy);
 }
 
 /**

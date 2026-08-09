@@ -8,7 +8,12 @@
  * (`lines`) is batch-local and resets between calls.
  */
 import { HL_CUT_KEYWORD, HL_PUT_KEYWORD, HL_RANGE_SEP } from "./format";
-import { ambiguousAnonymousPasteMessage, EMPTY_PASTE, emptyRegisterPasteWarning } from "./messages";
+import {
+	ambiguousAnonymousPasteMessage,
+	EMPTY_PASTE,
+	emptyRegisterPasteWarning,
+	emptyRegisterSpanPasteMessage,
+} from "./messages";
 import { cloneCursor } from "./tokenizer";
 import type { Clipboard, Edit } from "./types";
 
@@ -40,11 +45,14 @@ export interface ResolveClipboardEditsOptions {
 }
 
 /**
- * Read lines from a register. A missing named register warns and reads as
- * empty; anonymous misuse throws unless `onEmptyPaste === "drop"`.
+ * Read lines from a register. A missing named register reads as empty for a gap
+ * paste (a harmless no-op, warned) but throws for a `span` target, where pasting
+ * empty would delete the range; anonymous misuse throws unless
+ * `onEmptyPaste === "drop"`.
  */
 function readRegister(
 	register: string | undefined,
+	target: "gap" | "span",
 	clipboard: Clipboard,
 	lineNum: number,
 	onEmptyPaste: "throw" | "drop",
@@ -55,6 +63,9 @@ function readRegister(
 		if (lines !== undefined) return lines;
 		if (onEmptyPaste === "drop") return null;
 		const known = clipboard.named ? [...clipboard.named.keys()] : [];
+		if (target === "span") {
+			throw new Error(`line ${lineNum}: ${emptyRegisterSpanPasteMessage(register, known)}`);
+		}
 		onWarning?.(`line ${lineNum}: ${emptyRegisterPasteWarning(register, known)}`);
 		return [];
 	}
@@ -117,7 +128,14 @@ export function resolveClipboardEdits(
 			continue;
 		}
 		if (edit.kind === "paste") {
-			const lines = readRegister(edit.register, clipboard, edit.lineNum, onEmptyPaste, options.onWarning);
+			const lines = readRegister(
+				edit.register,
+				edit.at.kind,
+				clipboard,
+				edit.lineNum,
+				onEmptyPaste,
+				options.onWarning,
+			);
 			if (lines === null) continue;
 
 			if (edit.at.kind === "gap") {
@@ -209,7 +227,7 @@ export function validateClipboardSequence(edits: readonly Edit[], clipboard: Cli
 				fork.pendingAnonCuts.push(describeCutEdit(edit));
 			}
 		} else if (edit.kind === "paste") {
-			readRegister(edit.register, fork, edit.lineNum, "throw");
+			readRegister(edit.register, edit.at.kind, fork, edit.lineNum, "throw");
 		}
 	}
 }

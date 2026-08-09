@@ -172,7 +172,13 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
-	if (model.provider === "alibaba-token-plan" && model.id === "qwen3.8-max-preview" && model.thinking) return;
+	if (
+		model.provider === "alibaba-token-plan" &&
+		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&
+		model.thinking
+	) {
+		return;
+	}
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));

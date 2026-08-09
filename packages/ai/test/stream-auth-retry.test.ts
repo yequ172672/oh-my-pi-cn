@@ -514,6 +514,53 @@ describe("streamSimple resolver auth retry", () => {
 		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 	});
 
+	it("rotates through every distinct sibling on Codex cyber-policy denials", async () => {
+		const keys: unknown[] = [];
+		const eventTypes: string[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["credential-A", "credential-B", "credential-C", "credential-D"];
+		const errorMessage =
+			"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
+		const errorId = classify(new Error(errorMessage), "openai-codex-responses");
+		let nextSibling = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "credential-D") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError(errorMessage, undefined, errorId),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? pool[0] : pool[++nextSibling];
+			},
+		});
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(pool);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+
 	it("stops replay-safe usage rotation when the resolver cycles to an attempted credential", async () => {
 		const keys: unknown[] = [];
 		const resolved = ["credential-A", "credential-B", "credential-A"];

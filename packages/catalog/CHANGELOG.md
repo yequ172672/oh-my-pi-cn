@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [17.2.12] - 2026-08-08
+
+### Fixed
+
+- Fixed dynamically discovered `alibaba-token-plan/qwen3.8-max` metadata so thinking controls and image input are available ([#8019](https://github.com/can1357/oh-my-pi/issues/8019)).
+- Routed `opencode-go/deepseek-v4-flash` through the OpenAI responses API — the OpenCode Go gateway does not serve this model at `/zen/go/v1/chat/completions`, only at `/zen/go/v1/responses` (`deepseek-v4-pro` keeps chat completions).
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed

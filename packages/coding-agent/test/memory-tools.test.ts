@@ -743,7 +743,11 @@ describe("Mnemopi backend lifecycle", () => {
 		lock.exec("BEGIN IMMEDIATE");
 		const sharedMemory = state.globalMemory;
 		expect(sharedMemory).toBeDefined();
+		const sharedFlushCalled = Promise.withResolvers<void>();
 		const sharedFlushSpy = vi.spyOn(sharedMemory!, "flushExtractions").mockImplementation(async () => {
+			// Signal first: the exec below may throw SQLITE_BUSY while the lock is
+			// still held, and the call itself is what the test awaits.
+			sharedFlushCalled.resolve();
 			// Model a pending extraction/embedding commit. An idle shared bank performs
 			// no SQLite work during flush, so merely locking it would not exercise its
 			// connection's busy timeout.
@@ -756,11 +760,21 @@ describe("Mnemopi backend lifecycle", () => {
 		} finally {
 			lock.exec("ROLLBACK");
 			lock.close();
+		}
+		const elapsedMs = performance.now() - started;
+
+		try {
+			expect(elapsedMs).toBeLessThan(500);
+			// When the shutdown budget expires mid-consolidate, dispose detaches the
+			// pass instead of abandoning it (#3641) — so on a slow runner the shared
+			// flush may not have run yet when dispose returns. The lock is released
+			// above, so the detached pass must still reach the shared bank; await
+			// the call itself instead of asserting synchronously.
+			await sharedFlushCalled.promise;
+			expect(sharedFlushSpy).toHaveBeenCalledTimes(1);
+		} finally {
 			registeredMnemopiState = undefined;
 		}
-
-		expect(performance.now() - started).toBeLessThan(500);
-		expect(sharedFlushSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("dispose with no timeoutMs retains, flushes, and closes without sleeping (#3641)", async () => {

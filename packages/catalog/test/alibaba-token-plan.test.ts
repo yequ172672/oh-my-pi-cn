@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
@@ -13,6 +14,7 @@ describe("QwenCloud Token Plan provider", () => {
 	test("ships the documented Individual text-model allowlist", () => {
 		expect(ALIBABA_TOKEN_PLAN_STATIC_MODELS.map(model => model.id)).toEqual([
 			"qwen3.8-max-preview",
+			"qwen3.8-max",
 			"qwen3.7-max",
 			"qwen3.7-plus",
 			"qwen3.6-flash",
@@ -44,6 +46,15 @@ describe("QwenCloud Token Plan provider", () => {
 			Effort.High,
 			Effort.Max,
 		]);
+	});
+
+	test("bundles curated capabilities before dynamic discovery", () => {
+		expect(getBundledModel<"openai-completions">("alibaba-token-plan", "qwen3.8-max-preview")).toMatchObject({
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 983_616,
+			maxTokens: 131_072,
+		});
 	});
 
 	test("discovers subscribed chat models from the native models endpoint", async () => {
@@ -142,6 +153,26 @@ describe("QwenCloud Token Plan provider", () => {
 			name: "Qwen3.7 Plus",
 			contextWindow: 1_000_000,
 			maxTokens: 64_000,
+		});
+		expect(models?.find(model => model.id === "qwen3.8-max")).toMatchObject({
+			id: "qwen3.8-max",
+			provider: "alibaba-token-plan",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+				defaultLevel: Effort.XHigh,
+			},
+			compat: {
+				supportsReasoningEffort: true,
+				whenThinking: {
+					thinkingFormat: "openai",
+					extraBody: { enable_thinking: true },
+				},
+			},
 		});
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 	});

@@ -428,6 +428,21 @@ function tryParseHunkHeader(line: string): ParsedHunkHeader | null {
 	if (scan.nextIndex !== end) return null;
 	return { target: scan.target, hadColon: scan.hadColon };
 }
+/**
+ * Whether `text` would parse as a hunk header on its own (`PUT …`, `CUT …`,
+ * `REM`, `MV …`). Used to catch an op row mistakenly written as a `+` body row,
+ * which the applier would otherwise insert into the file as literal text.
+ */
+export function isHunkHeaderText(text: string): boolean {
+	const end = trimEndIndex(text);
+	const lead = skipWhitespace(text, 0, end);
+	const isHunkLead =
+		text.startsWith(HL_PUT_KEYWORD, lead) ||
+		text.startsWith(HL_CUT_KEYWORD, lead) ||
+		text.startsWith(HL_REM_KEYWORD, lead) ||
+		text.startsWith(HL_MOVE_KEYWORD, lead);
+	return isHunkLead && tryParseHunkHeader(text) !== null;
+}
 
 function tryParseHeader(line: string): { path: string; fileHash?: string } | null {
 	if (!line.startsWith(HL_FILE_PREFIX)) return null;

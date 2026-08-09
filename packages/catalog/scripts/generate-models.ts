@@ -546,12 +546,6 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
-	// Seed QwenCloud's documented Token Plan models when credentialed
-	// discovery is unavailable. A successful `/models` response is authoritative
-	// for the subscribed edition and must not be widened by the fallback.
-	if (!authoritativeCatalogProviders.has("alibaba-token-plan")) {
-		allModels.push(...ALIBABA_TOKEN_PLAN_STATIC_MODELS);
-	}
 	// Seed Anthropic models that are live on the first-party API or in limited
 	// release but that stencil.so has not catalogued yet (e.g. Claude Fable 5 /
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
@@ -656,6 +650,14 @@ async function generateModels() {
 	}
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Seed QwenCloud's documented Token Plan models when credentialed
+	// discovery is unavailable. A successful `/models` response is authoritative
+	// for the subscribed edition and must not be widened by the fallback.
+	// Deduplication keeps earlier rows, so prepend the curated seed to prevent
+	// incomplete upstream metadata from replacing its capabilities.
+	if (!authoritativeCatalogProviders.has("alibaba-token-plan")) {
+		allModels.unshift(...ALIBABA_TOKEN_PLAN_STATIC_MODELS);
+	}
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);

@@ -4,7 +4,6 @@ import { Text } from "./text";
 
 const RENDER_INTERVAL_MS = 1000 / 30;
 const SPINNER_ADVANCE_MS = 80;
-const MAX_RENDER_BACKPRESSURE_MS = 200;
 const RENDER_BACKPRESSURE_MULTIPLIER = 9;
 
 type ColorFn = (str: string) => string;
@@ -144,8 +143,8 @@ export class Loader extends Text {
 			if (this.#intervalId !== timer) return;
 			const cadenceDelayMs = Math.max(0, intervalMs - frameCostMs);
 			// Idle for nine times the paint cost to keep animation at or below
-			// 10% CPU, while cheap frames retain their original cadence.
-			const backpressureDelayMs = Math.min(MAX_RENDER_BACKPRESSURE_MS, frameCostMs * RENDER_BACKPRESSURE_MULTIPLIER);
+			// 10% CPU, even when a slow ConPTY write exceeds the normal cadence.
+			const backpressureDelayMs = frameCostMs * RENDER_BACKPRESSURE_MULTIPLIER;
 			this.#scheduleTick(intervalMs, Math.max(cadenceDelayMs, backpressureDelayMs));
 		}, delayMs);
 		this.#intervalId = timer;

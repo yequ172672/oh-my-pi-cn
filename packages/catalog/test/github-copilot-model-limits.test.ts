@@ -421,7 +421,12 @@ describe("github copilot model limits mapping", () => {
 			const { models } = await manager.refresh("online-if-uncached");
 
 			expect(fetchMock).toHaveBeenCalledTimes(1);
-			expect(models.find(candidate => candidate.id === "grok-4.5")).toBeUndefined();
+			// The bundled catalog now ships a responses-route grok-4.5, so the id
+			// resurfaces from the bundle after the failed refresh. The migration
+			// contract is that the stale cached COMPLETIONS route never comes
+			// back — and the cached long-context variant has no bundled entry,
+			// so it stays dropped.
+			expect(models.find(candidate => candidate.id === "grok-4.5")?.api).toBe("openai-responses");
 			expect(models.find(candidate => candidate.id === "grok-4.5-1m")).toBeUndefined();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

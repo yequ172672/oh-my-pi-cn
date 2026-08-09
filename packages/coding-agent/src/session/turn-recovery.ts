@@ -924,9 +924,9 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Check if an error is retryable (transient errors or usage limits).
+	 * Check if an error is retryable (transient errors, usage limits, or
+	 * account-scoped policy denials that can rotate credentials).
 	 * Context overflow is NOT retryable (handled by compaction instead).
-	 * Usage-limit errors are retryable because the retry handler performs credential switching.
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -937,12 +937,11 @@ export class TurnRecovery {
 		const contextWindow = this.#host.model()?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
-		// A classifier refusal/sensitivity stop is the model's decision, not a route
-		// failure, but only after we confirm no replay-unsafe output has already
-		// streamed. Committed text, images, tool calls, or server tools must not be
-		// discarded and replayed.
+		// Credential rotation and classifier fallbacks are safe only before
+		// committed text, images, tool calls, or server tools. Thinking-only
+		// output remains replay-safe.
 		if (this.#hasReplayUnsafeOutput(message)) return false;
-		if (this.isClassifierRefusal(message)) return true;
+		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
 		return AIError.retriable(id);
 	}
 
@@ -1603,6 +1602,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
+		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
@@ -1672,6 +1672,14 @@ export class TurnRecovery {
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
+		if (accountPolicyDenial && currentModel) {
+			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
+				currentModel.provider,
+				this.#host.sessionId(),
+				{ error: errorMessage, modelId: currentModel.id },
+			);
+			if (switchedCredential) delayMs = 0;
+		}
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -1696,7 +1704,7 @@ export class TurnRecovery {
 		}
 
 		if (retryBudgetExhausted) {
-			if (!switchedModel) {
+			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
@@ -1713,11 +1721,12 @@ export class TurnRecovery {
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
-			// The fallback model gets a fresh retry budget — leaving the spent
-			// counter in place would exhaust it again on its first error.
-			this.#retryAttempt = 1;
+			// A fallback model gets a fresh retry budget. Credential rotation
+			// instead keeps the cumulative attempt count while bypassing the
+			// same-route budget: every distinct account must be tried first.
+			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if (classifierRefusal && !switchedModel) {
+		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this

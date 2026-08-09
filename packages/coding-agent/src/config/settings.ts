@@ -443,11 +443,15 @@ export class Settings {
 	}
 
 	/**
-	 * Create an isolated instance for testing.
-	 * Does not affect the global singleton.
+	 * Create an in-memory settings instance without affecting the global singleton.
+	 * A supplied storage handle remains shared for runtime data while setting overrides stay non-persistent.
 	 */
-	static isolated(overrides: Partial<Record<SettingPath, unknown>> = {}): Settings {
+	static isolated(
+		overrides: Partial<Record<SettingPath, unknown>> = {},
+		options: { storage?: AgentStorage | null } = {},
+	): Settings {
 		const instance = new Settings({ inMemory: true, overrides });
+		instance.#storage = options.storage ?? null;
 		instance.#rebuildMerged();
 		return instance;
 	}

@@ -83,12 +83,12 @@ Capture is direct from the oneshot response; no agent-loop events or latest-assi
 
 ### 3) Cancellation checks
 
-Cancellation throws `Error("Handoff cancelled")`; a completed generation with no text returns `undefined`.
+An explicit user cancellation throws `Error("Handoff cancelled")`. Harness-initiated aborts preserve a supplied reason, or surface `Handoff aborted by session` when none is supplied. A manual handoff whose generation is empty/whitespace-only throws `Handoff generation produced no content`; auto-handoff returns `undefined` so maintenance can fall back to context-full compaction.
 
-- caller signal aborts `#handoffAbortController`
+- caller signal aborts `#handoffAbortController` and forwards its reason
 - `completeSimple(...)` receives the abort signal
-- aborted handoff signal or provider `AbortError` is normalized to `Error("Handoff cancelled")`
-- empty generated text returns `undefined`
+- direct `abortHandoff()` or an unreasoned caller signal is normalized to `Error("Handoff cancelled")`
+- harness abort reasons and provider failures (including provider `AbortError`s) surface verbatim
 
 `AgentSession.handoff()` always clears `#handoffAbortController` in `finally`.
 
@@ -185,8 +185,8 @@ If auto generation returns no document, maintenance falls back to context-full c
   - appends `New session started with handoff context`
   - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
 - On exception:
-  - if message is `"Handoff cancelled"` or error name is `AbortError`: `showError("Handoff cancelled")`
-  - otherwise: `showError("Handoff failed: <message>")`
+  - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
+  - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
 - Stops the loader, clears the status container, and requests render at end.
 
 Manual `/handoff` no longer streams the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after generation completes.
@@ -200,7 +200,7 @@ Manual `/handoff` no longer streams the generated document into chat. A cancella
 - `abortHandoff()` → aborts `#handoffAbortController`
 - `isGeneratingHandoff` → true while controller exists
 
-When this abort path is used, the abort signal is passed to `completeSimple(...)`; `handoff()` normalizes the cancellation to `Error("Handoff cancelled")`, and command controller maps it to cancellation UI.
+Direct `abortHandoff()` passes an unreasoned abort signal to `completeSimple(...)`; `handoff()` normalizes it to `Error("Handoff cancelled")`, and command controller maps it to cancellation UI. `AgentSession.abort(...)` instead aborts the handoff first with its harness reason (or `Handoff aborted by session`), so subsequent compaction cancellation cannot mask that failure as a user cancellation.
 
 ### Interactive `/handoff` path
 
@@ -211,14 +211,14 @@ When this abort path is used, the abort signal is passed to `completeSimple(...)
 Current UI classification:
 
 - **Aborted/cancelled**
-  - `abortHandoff()` path triggers `"Handoff cancelled"`, or
-  - thrown `AbortError`
+  - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
+  - an unreasoned caller signal also triggers `"Handoff cancelled"`
   - UI shows `Handoff cancelled`
 - **Failed**
-  - any other thrown error from the session transition or provider request path
-  - UI shows `Handoff failed: ...`
+  - a harness abort reason, an empty manual generation, or any thrown provider/session-transition error
+  - UI logs the error and shows `Handoff failed: ...`
 
-Additional nuance: empty generated text or an extension-cancelled `session_before_switch` returns `undefined`, and the interactive controller currently reports **cancelled**, not **failed**.
+An extension-cancelled `session_before_switch` returns `undefined`, which the interactive controller reports as **cancelled**. Empty generation is not an extension cancellation: manual handoff throws; auto-handoff returns `undefined` only for its context-full fallback.
 
 ## Short-session and minimum-content guardrails
 

@@ -971,14 +971,16 @@ export class AdvisorRuntime {
 					this.#wakeAllWaiters();
 					const failedMessages = this.agent.state.messages.slice(messageSnapshot);
 					const terminalFailure = this.#terminalAssistantFailure(messageSnapshot);
-					const classifierRefusal =
-						(terminalFailure !== undefined && isClassifierRefusal(terminalFailure)) ||
-						AIError.is(AIError.classify(err), AIError.Flag.ContentBlocked);
+					const rawErrorId = AIError.classify(err);
 					const terminalFailureId =
 						terminalFailure === undefined ? undefined : AIError.classifyMessage(terminalFailure);
+					const classifierRefusal =
+						(terminalFailure !== undefined && isClassifierRefusal(terminalFailure)) ||
+						(!AIError.is(rawErrorId, AIError.Flag.AccountPolicy) &&
+							AIError.is(rawErrorId, AIError.Flag.ContentBlocked));
 					const contextOverflow =
 						(terminalFailureId !== undefined && AIError.is(terminalFailureId, AIError.Flag.ContextOverflow)) ||
-						AIError.is(AIError.classify(err), AIError.Flag.ContextOverflow);
+						AIError.is(rawErrorId, AIError.Flag.ContextOverflow);
 					// A terminal provider failure that is neither retriable nor an
 					// overflow (e.g. a blocked prompt) will fail identically on every
 					// retry — classify it before rollback so the batch is dropped after
@@ -1209,12 +1211,14 @@ export class AdvisorRuntime {
 	}
 }
 
-/** Mirrors turn recovery's refusal classification and retains AIError's provider-neutral content-block fallback. */
+/** Mirrors turn recovery's refusal classification without treating account eligibility as a model refusal. */
 function isClassifierRefusal(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
+	const id = AIError.classifyMessage(message);
+	if (AIError.is(id, AIError.Flag.AccountPolicy)) return false;
 	const stopType = message.stopDetails?.type;
 	if (stopType === "refusal" || stopType === "sensitive") return true;
-	return AIError.is(AIError.classifyMessage(message), AIError.Flag.ContentBlocked);
+	return AIError.is(id, AIError.Flag.ContentBlocked);
 }
 
 /**

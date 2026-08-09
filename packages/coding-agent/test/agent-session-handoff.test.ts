@@ -178,6 +178,13 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("emits handoff lifecycle hooks on the outgoing and replacement sessions", async () => {
+		// dispose() is terminal: it closes the manager and releases its in-memory
+		// transcript. Reopen the persisted session file for the replacement
+		// session, as production revival paths do.
+		await session.dispose();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		const extensionsResult = await loadExtensions([], tempDir.path());
 		const extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
@@ -212,7 +219,6 @@ describe("AgentSession handoff", () => {
 			return emit(event);
 		});
 
-		await session.dispose();
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -292,6 +298,9 @@ describe("AgentSession handoff", () => {
 			return stream;
 		};
 		await session.dispose();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -1740,6 +1749,12 @@ describe("AgentSession handoff", () => {
 			throw new Error("Expected model to be set");
 		}
 
+		// See "emits handoff lifecycle hooks": reopen the persisted transcript
+		// after the terminal dispose before wiring the replacement session.
+		await session.dispose();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		const extensionsResult = await loadExtensions([], tempDir.path());
 		const extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
@@ -1753,7 +1768,6 @@ describe("AgentSession handoff", () => {
 			cancel: true,
 		})) as ExtensionRunner["emit"]);
 
-		await session.dispose();
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -2011,6 +2025,24 @@ describe("AgentSession handoff", () => {
 		expect(generateHandoffSpy.mock.calls[0]?.[2]?.streamOptions?.signal?.aborted).toBe(true);
 	});
 
+	it("surfaces the reason when the harness aborts an in-flight handoff", async () => {
+		const started = Promise.withResolvers<void>();
+		const cancelled = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation((_context, _model, options) => {
+			started.resolve();
+			options.streamOptions.signal?.addEventListener("abort", () => cancelled.reject(new Error("request aborted")), {
+				once: true,
+			});
+			return cancelled.promise;
+		});
+
+		const handoffPromise = session.handoff();
+		await started.promise;
+		await session.abort({ reason: "Harness stopped the session" });
+
+		await expect(handoffPromise).rejects.toThrow("Harness stopped the session");
+	});
+
 	it("surfaces the real error when generation fails without a user abort", async () => {
 		// Providers throw name==="AbortError" errors on non-user conditions (stalls,
 		// nested resolution failures). The handoff signal is never aborted here, so the
@@ -2024,5 +2056,26 @@ describe("AgentSession handoff", () => {
 		await expect(session.handoff()).rejects.toThrow("Deepseek stream stalled");
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(session.isGeneratingHandoff).toBe(false);
+	});
+
+	it("surfaces empty handoff generation as a failure, not a false cancel", async () => {
+		// Regression for #7993: the #7904 fix stopped masking provider errors as
+		// "Handoff cancelled", but an empty/whitespace-only generation still returned
+		// undefined, which the /handoff caller reported as "Handoff cancelled" with no
+		// detail. Empty output is a real failure and must surface as one.
+		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("   \n  ");
+
+		await expect(session.handoff()).rejects.toThrow("Handoff generation produced no content");
+		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
+		expect(session.isGeneratingHandoff).toBe(false);
+	});
+
+	it("auto-triggered handoff returns undefined on empty generation for context-full fallback", async () => {
+		// Auto-handoff is best-effort: an empty document must NOT throw so maintenance
+		// can fall back to context-full compaction (see runAutoCompaction).
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("");
+
+		const result = await session.handoff(undefined, { autoTriggered: true });
+		expect(result).toBeUndefined();
 	});
 });

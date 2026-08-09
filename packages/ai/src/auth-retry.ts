@@ -2,7 +2,7 @@ import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { OAuthAccess } from "./auth-storage";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
-import { isUsageLimit } from "./error/flags";
+import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
 /**
@@ -19,9 +19,9 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
  *   (invalidate/usage-limit the current credential and rotate to a sibling).
  *
  * Current drivers preserve that bounded a/b/c sequence for ordinary 401/auth
- * failures. 403/usage-limit failures skip refresh and may repeat step (c)
- * until the resolver returns `undefined`, cycles, or hits
- * {@link AUTH_RETRY_MAX_ATTEMPTS}.
+ * failures. Account-scoped policy denials, 403s, and usage-limit failures skip
+ * refresh and may repeat step (c) until the resolver returns `undefined`,
+ * cycles, or hits {@link AUTH_RETRY_MAX_ATTEMPTS}.
  */
 export interface ApiKeyResolveContext {
 	/** True when the resolver should rotate to a sibling credential. */
@@ -91,6 +91,7 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

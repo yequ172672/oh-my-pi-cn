@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { isOAuthExpiry, isUsageLimit } from "./flags";
+import { isAccountPolicyError, isOAuthExpiry, isUsageLimit } from "./flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
@@ -27,15 +27,16 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 /**
  * Whether an upstream failure should rotate to a sibling credential: a hard
  * `401`, a `403` (token valid but access denied — plan, model policy, or org
- * restriction a sibling account may not share), a body-classified usage limit
- * (Codex `usage_limit_reached`, Anthropic account rate-limit, Google
+ * restriction a sibling account may not share), an account-scoped policy
+ * denial such as Codex `cyber_policy`, a body-classified usage limit (Codex
+ * `usage_limit_reached`, Anthropic account rate-limit, Google
  * `resource_exhausted`, OpenAI `insufficient_quota`, …), or a bare `429`
- * whose payload did not preserve a richer quota code.
- * Transient 429s (`Too many requests`, per-minute caps) stay in the
- * upstream-backoff lane.
+ * whose payload did not preserve a richer quota code. Transient 429s
+ * (`Too many requests`, per-minute caps) stay in the upstream-backoff lane.
  */
 export function isAuthRetryableError(error: unknown): boolean {
 	if (isUsageLimit(error)) return true;
+	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	const httpStatus = extractHttpStatusFromError(error);
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

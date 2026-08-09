@@ -30,6 +30,17 @@ function createHandoffFileName(date = new Date()): string {
 	return `handoff-${fileTimestamp}.md`;
 }
 
+function throwIfHandoffAborted(signal: AbortSignal): void {
+	if (!signal.aborted) return;
+	const reason = signal.reason;
+	if (reason instanceof DOMException && reason.name === "AbortError") {
+		throw new Error("Handoff cancelled");
+	}
+	if (reason instanceof Error) throw reason;
+	if (typeof reason === "string" && reason.length > 0) throw new Error(reason);
+	throw new Error("Handoff aborted by session");
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionHandoffHost {
 	agent: Agent;
@@ -81,10 +92,10 @@ export class SessionHandoff {
 		this.#host = host;
 	}
 	/**
-	 * Cancel in-progress handoff generation.
+	 * Cancel in-progress handoff generation, preserving a harness-provided reason.
 	 */
-	abortHandoff(): void {
-		this.#handoffAbortController?.abort();
+	abortHandoff(reason?: Error): void {
+		this.#handoffAbortController?.abort(reason);
 	}
 
 	/**
@@ -118,7 +129,7 @@ export class SessionHandoff {
 		const sourceSignal = options?.signal;
 		const onSourceAbort = () => {
 			if (!handoffSignal.aborted) {
-				handoffAbortController.abort();
+				handoffAbortController.abort(sourceSignal?.reason);
 			}
 		};
 		if (sourceSignal) {
@@ -131,9 +142,7 @@ export class SessionHandoff {
 		let advisorRecordersDetached = false;
 		let sessionTransitioned = false;
 		try {
-			if (handoffSignal.aborted) {
-				throw new Error("Handoff cancelled");
-			}
+			throwIfHandoffAborted(handoffSignal);
 
 			const model = this.#host.model();
 			if (!model) {
@@ -208,11 +217,23 @@ export class SessionHandoff {
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
-			if (handoffSignal.aborted) {
-				throw new Error("Handoff cancelled");
-			}
-			if (!handoffText) {
-				return undefined;
+			throwIfHandoffAborted(handoffSignal);
+			if (!handoffText || handoffText.trim().length === 0) {
+				// Empty/whitespace-only generation is a real failure, not a user
+				// cancellation. #7904 stopped masking provider errors as "Handoff
+				// cancelled"; an empty document is the remaining path that produced the
+				// same misleading, undebuggable message (#7993).
+				logger.warn("Handoff generation produced no content", {
+					sessionId: this.#host.sessionId(),
+					autoTriggered: options?.autoTriggered ?? false,
+				});
+				// Auto-handoff is best-effort: returning undefined lets maintenance fall
+				// back to context-full compaction. A user-initiated handoff must surface
+				// the failure instead of a silent, misleading "cancelled".
+				if (options?.autoTriggered) {
+					return undefined;
+				}
+				throw new Error("Handoff generation produced no content");
 			}
 
 			// Start a new session
@@ -310,13 +331,10 @@ export class SessionHandoff {
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
-			// Only a genuine abort (user Esc or the source turn cancelling) is a
-			// cancellation. A provider that throws a name==="AbortError" error without the
-			// handoff signal being aborted (stall/idle timeout, nested resolution failure)
-			// is a real failure and must surface verbatim, not be masked as "cancelled".
-			if (handoffSignal.aborted) {
-				throw new Error("Handoff cancelled");
-			}
+			// Only a genuine cancellation (user Esc or an unreasoned source-signal
+			// abort) maps to "Handoff cancelled". A harness-provided abort reason and
+			// provider failures surface verbatim.
+			throwIfHandoffAborted(handoffSignal);
 			throw error;
 		} finally {
 			if (advisorRecordersDetached) {

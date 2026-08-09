@@ -25,7 +25,7 @@ git diff --stat main...upstream/main
 git merge --no-ff --no-commit upstream/main
 ```
 
-必须在 merge 前保存 `$base`。遇到冲突时逐文件保留上游业务行为，再重新接入中文资源和适配层；无法确认时停止并说明双方行为，不能批量选择 `ours` 或 `theirs`。
+必须在 merge 前保存 `$base`。遇到冲突时以上游业务逻辑、接口、目录结构、依赖和测试语义为准，再重新接入中文资源与适配层；中文分支不保留缺少本地化或 `omp-cn` 发行身份理由的平行业务实现。无法确认时停止并说明双方行为，不能批量选择 `ours` 或 `theirs`。
 
 重点保留并验证：
 

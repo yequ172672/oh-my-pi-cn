@@ -93,11 +93,12 @@ describe("clipboard apply semantics", () => {
 		expect(() => section.applyTo("l1\nl2\n")).toThrow(/Nothing to paste/);
 	});
 
-	it("treats a span paste from an empty named register as a cut with a warning", () => {
+	// Pasting a never-captured register over a span would delete the range and
+	// write nothing back — a mistyped register name must not silently destroy
+	// content. (Gap pastes stay a warned no-op; see the next test.)
+	it("rejects a span paste from an empty named register instead of deleting the range", () => {
 		const section = Patch.parseSingle(`[${PATH}#1A2B]\nPUT 2-3 @gone`);
-		const result = section.applyTo("l1\nl2\nl3\nl4\n");
-		expect(result.text).toBe("l1\nl4\n");
-		expect(result.warnings?.join("\n")).toMatch(/`@gone` was empty/);
+		expect(() => section.applyTo("l1\nl2\nl3\nl4\n")).toThrow(/`@gone` is empty.*would delete those lines/s);
 	});
 
 	it("pastes nothing at a gap from an empty named register, with a warning", () => {

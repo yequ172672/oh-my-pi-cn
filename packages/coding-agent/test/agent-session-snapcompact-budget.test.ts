@@ -246,6 +246,11 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 		await session.dispose();
+		// dispose() released the manager's in-memory transcript; reopen the
+		// persisted file for the replacement session, as revival paths do.
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		const unknownWindowModel = { ...model, contextWindow: 0 };
 		session = new AgentSession({
 			agent: new Agent({

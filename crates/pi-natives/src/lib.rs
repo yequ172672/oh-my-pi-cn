@@ -202,12 +202,12 @@ fn configure_rayon_pool() {
 			.num_threads(threads)
 			.build_global(),
 		RayonPoolPlan::SkipGlobalPool => {
-			pi_uutils_ctx::set_rayon_global_pool_available(false);
+			pi_shell::set_rayon_global_pool_available(false);
 			return;
 		},
 	};
 	if result.is_ok() {
-		pi_uutils_ctx::set_rayon_global_pool_available(true);
+		pi_shell::set_rayon_global_pool_available(true);
 	}
 }
 
@@ -255,7 +255,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
 /// `packages/natives/native/index.js` (which derives the name from
 /// `package.json#version`).
-#[napi(js_name = "__piNativesV17_2_11")]
+#[napi(js_name = "__piNativesV17_2_12")]
 pub const fn pi_natives_version_sentinel() {}
 
 /// Native module entry point: install crash diagnostics before any tool can

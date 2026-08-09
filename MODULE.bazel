@@ -145,7 +145,7 @@ crate.from_cargo(
     ],
     # The root manifest covers all workspace members, including the vendored
     # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entries redirect brush-builtins' registry dep to them).
+    # [patch.crates-io] entry redirects brush-core's registry dep to it).
     manifests = ["//:Cargo.toml"],
 )
 

@@ -2689,6 +2689,17 @@ const ALIBABA_TOKEN_PLAN_REASONING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 };
+// Qwen3.8-Max combines Qwen's binary thinking toggle with OpenAI-style
+// `reasoning_effort`. The base Qwen view encodes disabled turns; reasoning
+// requests swap to the OpenAI effort dialect and explicitly enable thinking.
+const ALIBABA_TOKEN_PLAN_QWEN_EFFORT_COMPAT: OpenAICompat = {
+	...ALIBABA_TOKEN_PLAN_COMPAT,
+	supportsReasoningEffort: true,
+	whenThinking: {
+		thinkingFormat: "openai",
+		extraBody: { enable_thinking: true },
+	},
+};
 
 export const ALIBABA_TOKEN_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
@@ -2711,6 +2722,24 @@ export const ALIBABA_TOKEN_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-comple
 			...ALIBABA_TOKEN_PLAN_COMPAT,
 			supportsReasoningEffort: true,
 		},
+	},
+	{
+		id: "qwen3.8-max",
+		name: "Qwen3.8 Max",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			defaultLevel: Effort.XHigh,
+		},
+		compat: ALIBABA_TOKEN_PLAN_QWEN_EFFORT_COMPAT,
 	},
 	{
 		id: "qwen3.7-max",
@@ -5501,7 +5530,14 @@ const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencod
 // anthropic-style requests to /v1/messages and the gateway would return its
 // `Page Not Found` HTML (issue #887 for the qwen/m2.7 entries; minimax-m3
 // and minimax-m3-free added under #1617 for the same root cause).
+//
+// deepseek-v4-flash is the inverse case: it falls through to
+// openai-completions by default, but the Go gateway's
+// /zen/go/v1/chat/completions route does not work for this model while
+// /zen/go/v1/responses does (user-verified against the live gateway,
+// 2026-08-08; Flash only — deepseek-v4-pro serves fine on chat completions).
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", {
+	"deepseek-v4-flash": "openai-responses",
 	"minimax-m2.7": "openai-completions",
 	"minimax-m3": "openai-completions",
 	"minimax-m3-free": "openai-completions",

@@ -375,4 +375,35 @@ describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
 
 		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["seed"]);
 	});
+
+	it("drain waits for an in-flight atomic publish that passed its guard before the seal", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// The guard passes at enqueue time, then the backend write parks on the
+		// wire (Redis/SQL). A terminal seal lands while it is in flight. drain()
+		// — what SessionManager.close() awaits before dispose returns — must not
+		// resolve until the publish settles, or a revival could reopen the path
+		// and be overwritten afterwards.
+		let sealed = false;
+		const write = storage.writeTextAtomic("/sessions/s.jsonl", "pre-seal body", {
+			commitGuard: () => !sealed,
+		});
+		await backend.firstWriteStarted.promise;
+		sealed = true;
+
+		let drained = false;
+		const drainP = storage.drain().then(() => {
+			drained = true;
+		});
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(drained).toBe(false);
+
+		backend.firstWriteRelease.resolve();
+		await drainP;
+		await write;
+		expect(drained).toBe(true);
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["pre-seal body"]);
+	});
 });

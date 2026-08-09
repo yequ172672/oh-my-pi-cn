@@ -196,7 +196,7 @@ _[观看演示 ↗](https://omp.sh/clips/web.mp4)_
 
 ### 09 · 真正的原生能力，Windows 也一样
 
-其他代理需要启动 rg、grep、find 和 bash。很多机器根本没有这些二进制文件，即使存在，每次调用也要付出一次 fork-exec 往返成本。omp 将真实实现直接链接到进程中：ripgrep、glob、find 都在进程内运行；brush 提供 bash，跨调用保留会话；46 个 vendored coreutils（包括 ls、sed、sort、xargs，以及通过 jaq 提供的 jq）也作为内置功能运行，不需要 fork/exec。同一个 omp 二进制文件可以运行在 macOS、Linux 和 Windows 上，无需 WSL 桥接。
+其他代理需要启动 rg、grep、find 和 bash。很多机器根本没有这些二进制文件，即使存在，每次调用也要付出一次 fork-exec 往返成本。omp 将真实实现直接链接到进程中：ripgrep、glob、find 都在进程内运行；brush 提供 bash，跨调用保留会话；58 个命令行工具（包括 ls、sed、sort、xargs 和 jq）已移植到 `pi-builtins` crate，并作为内置功能在进程内运行，无需 fork/exec。同一个 omp 二进制文件可以运行在 macOS、Linux 和 Windows 上，无需 WSL 桥接。
 
 ### 10 · 带优先级和结论的代码审查
 
@@ -452,9 +452,9 @@ Exa 也支持通过 /login exa 保存 API Key；明确选择无密钥模式时�
 
 ## 约 8 万行 Rust，负责其他代理需要通过外部进程完成的工作
 
-九个 crate 加一个带平台标签的 N-API 插件。搜索、shell、AST、语法高亮、PTY、桌面控制、图像解码和 BPE 计数都在 libuv 线程池中进程内完成，热点路径不需要 fork/exec。另有约 7.7 万行 vendored 代码随项目发布，包括 brush bash 分支、jaq jq 引擎和直接编译进 shell 的 46 个 uutils coreutils。
+六个 crate 加一个带平台标签的 N-API 插件。搜索、shell、AST、语法高亮、PTY、桌面控制、图像解码和 BPE 计数都在 libuv 线程池中进程内完成，热点路径不需要 fork/exec。另有约 8 万行 vendored 代码随项目发布，包括 brush bash 分支，以及 58 个命令行工具——coreutils、findutils、sed、jq、基于 ripgrep 的 grep、fd、diff 和 moreutils——已移植到 `pi-builtins` crate 并直接编译进 shell。
 
-- Crate：pi-natives、pi-shell、pi-ast、pi-iso、pi-voice、pi-walker、pi-uu-grep、pi-uu-diff、pi-uutils-ctx；
+- Crate：pi-natives、pi-shell、pi-ast、pi-iso、pi-voice、pi-walker；
 - 平台：linux-x64、linux-arm64、darwin-x64、darwin-arm64、win32-x64；x64 提供 AVX2 和基础指令集两套二进制文件。
 
 以下仅统计各 crate 的代码行数：
@@ -465,11 +465,8 @@ Exa 也支持通过 /login exa 保存 API Key；明确选择无密钥模式时�
 | pi-natives | N-API 接口，包含下表中的所有模块 | 25,000 |
 | pi-walker | 并行且遵循忽略规则的遍历器，以及 grep、glob、workspace、shell 共用的扫描缓存 | 5,200 |
 | pi-iso | 工作区隔离，支持 APFS、btrfs、zfs、reflink、overlayfs、projfs、rcopy | 3,300 |
-| pi-uu-grep | 基于 ripgrep 的 grep，作为进程内 shell 内置功能运行 | 3,300 |
 | pi-ast | tree-sitter 和 ast-grep 匹配、区块解析与结构化摘要 | 2,900 |
 | pi-voice | 音频采集和播放、Opus、实时 WebRTC | 1,000 |
-| pi-uu-diff | 基于 similar 的结构化 diff 内置工具 | 500 |
-| pi-uutils-ctx | 线程本地 stdio、cwd、env，使内置工具可以并发运行而无需 fork | 300 |
 
 pi-natives 内部的模块代码行数如下（不含胶水代码和测试）：
 
@@ -659,13 +656,8 @@ bun dev -- --version
 | **[pi-iso](crates/pi-iso)** | 任务隔离后端解析器，支持 APFS 克隆、btrfs/zfs reflink、overlayfs、projfs 和 rcopy |
 | **[pi-voice](crates/pi-voice)** | 音频采集/播放、Opus 编解码和实时 WebRTC 流式能力 |
 | **[pi-walker](crates/pi-walker)** | 并行、遵循忽略规则的文件遍历器，与 grep 共用扫描缓存 |
-| **[pi-uu-grep](crates/pi-uu-grep)** | 基于 ripgrep 库的进程内 grep |
-| **[pi-uu-diff](crates/pi-uu-diff)** | 由 similar 支持的结构化 diff 内置功能 |
-| **[pi-uutils-ctx](crates/pi-uutils-ctx)** | 线程本地 stdio/cwd/env，使进程内置功能可以并发运行 |
 | **[brush-core](crates/vendor/brush-core)** | [brush-shell](https://github.com/reubeno/brush) 的 vendored 分支，用于嵌入式 bash 执行 |
-| **[brush-builtins](crates/vendor/brush-builtins)** | vendored bash 内置命令，包括 cd、echo、test、printf、read、export 等 |
-| **[jaq](crates/vendor/jaq)** | 兼容 jq 的 JSON 查询引擎，以进程内内置功能运行 |
-| **uu-* 系列**（[crates/vendor](crates/vendor)） | 46 个 vendored uutils coreutils（ls、sed、sort、xargs 等），在进程内执行 |
+| **[pi-builtins](crates/pi-builtins)** | Bash 内置命令（cd、echo、test、printf、read、export 等），以及 67 个进程内命令行工具 |
 
 ## 参与贡献
 

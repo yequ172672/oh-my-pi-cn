@@ -17,6 +17,7 @@ import {
 	EMPTY_INSERT,
 	EMPTY_PUT_AUTO_CUT_WARNING,
 	invalidAbsoluteRangeMessage,
+	literalOpRowWarning,
 	MINUS_BULLET_AUTO_PIPED_WARNING,
 	MINUS_ROW_REJECTED,
 	MOVE_TAKES_NO_BODY,
@@ -24,10 +25,11 @@ import {
 	REGISTER_PUT_TAKES_NO_BODY,
 	REM_TAKES_NO_BODY,
 	REPLACE_PAIR_COALESCED_WARNING,
+	repeatedSnapshotRowMessage,
 	SNAPSHOT_ROWS_AUTO_PUT_WARNING,
 } from "./messages";
 import { isReadMetadataLine, stripOneLeadingHashlinePrefix } from "./prefixes";
-import { type BlockTarget, cloneCursor, type ParsedRange, type Token, Tokenizer } from "./tokenizer";
+import { type BlockTarget, cloneCursor, isHunkHeaderText, type ParsedRange, type Token, Tokenizer } from "./tokenizer";
 import type { Anchor, BlockSpan, Cursor, Edit, FileOp, PasteTarget } from "./types";
 
 /** Bounds parser amplification before the target file's line count is available. */
@@ -210,6 +212,8 @@ export class Executor {
 	#fileOp: FileOp | undefined;
 	#terminated = false;
 	#skippableComments: PendingComment[] = [];
+	/** Source lines already recovered from top-level `N:TEXT` rows in this section. */
+	#recoveredSnapshotLines = new Set<number>();
 
 	#discardPendingSkippableComments(): void {
 		this.#skippableComments = [];
@@ -458,6 +462,10 @@ export class Executor {
 		const noBodyOnLiteral = bodylessTargetMessage(pending.target, pending.hadColon);
 		if (noBodyOnLiteral !== null) throw new Error(`line ${lineNum}: ${noBodyOnLiteral}`);
 		this.#commitDeferredBlanks(pending);
+		// An op written with the payload prefix is inserted as literal text. That
+		// is the correct reading of `+TEXT`, but it silently plants a `CUT …` line
+		// in the file, so name it at the moment it happens.
+		if (isHunkHeaderText(text)) this.#warnings.push(literalOpRowWarning(lineNum, text));
 		pending.payloads.push({ kind: "literal", text, lineNum });
 	}
 
@@ -513,6 +521,14 @@ export class Executor {
 		}
 		const snapshotRow = parseTopLevelSnapshotRow(text);
 		if (snapshotRow !== null) {
+			// Each recovered row becomes a single-line replacement, so a repeated
+			// line number is never a set of replacements — it is a body written as
+			// consecutive lines under one number. Collapsing it would silently keep
+			// only the last row and drop the rest.
+			if (this.#recoveredSnapshotLines.has(snapshotRow.line)) {
+				throw new Error(`line ${lineNum}: ${repeatedSnapshotRowMessage(snapshotRow.line)}`);
+			}
+			this.#recoveredSnapshotLines.add(snapshotRow.line);
 			const range = { start: { line: snapshotRow.line }, end: { line: snapshotRow.line } };
 			validateRange(range, lineNum, "replace");
 			this.#pushInsert(

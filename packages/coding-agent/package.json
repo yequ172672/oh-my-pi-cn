@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "17.2.11",
+  "version": "17.2.12",
   "description": "omp coding agent 的简体中文本地化分支，包含设置、供应商配置、提示和 CLI 文案中文化",
   "homepage": "https://github.com/yequ172672/oh-my-pi-cn",
   "author": "yequ172672",

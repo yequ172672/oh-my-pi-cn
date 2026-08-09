@@ -1167,47 +1167,42 @@ export class SessionAdvisors {
 		const failedMessage = failedMessages.findLast(
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
-		if (failedMessage?.stopReason !== "error") {
-			// Stream setup can reject before any assistant turn is recorded (e.g.
-			// an HTTP 429 thrown from prompt()); classify the raw error so a
-			// structural usage limit still marks the exhausted credential.
-			const message = error instanceof Error ? error.message : String(error);
-			if (!AIError.isUsageLimit(error) && !isUsageLimitOutcome(extractHttpStatusFromError(error), message)) {
-				return false;
-			}
-			const currentModel = advisor.agent.state.model;
-			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
-				currentModel.provider,
-				advisor.providerSessionId,
-				{
-					retryAfterMs: extractRetryHint(undefined, message),
-					baseUrl: currentModel.baseUrl,
-					modelId: currentModel.id,
-					signal,
-				},
-			);
-			return outcome.switched;
-		}
-		if (failedMessage.content.some(block => block.type === "toolCall")) return false;
+		const assistantFailure = failedMessage?.stopReason === "error" ? failedMessage : undefined;
+		if (assistantFailure?.content.some(block => block.type === "toolCall")) return false;
 
 		const currentModel = advisor.agent.state.model;
-		const message = failedMessage.errorMessage ?? (error instanceof Error ? error.message : String(error));
-		const errorId = AIError.classifyMessage({
-			api: currentModel.api,
-			errorId: failedMessage.errorId,
-			errorMessage: message,
-			errorStatus: failedMessage.errorStatus,
-		});
+		const message = assistantFailure?.errorMessage ?? (error instanceof Error ? error.message : String(error));
+		const errorId = assistantFailure
+			? AIError.classifyMessage({
+					api: currentModel.api,
+					errorId: assistantFailure.errorId,
+					errorMessage: message,
+					errorStatus: assistantFailure.errorStatus,
+				})
+			: AIError.classify(error, currentModel.api);
 		if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
-		if (AIError.isContextOverflow(failedMessage, currentModel.contextWindow ?? 0)) return false;
+		if (
+			AIError.is(errorId, AIError.Flag.ContextOverflow) ||
+			(assistantFailure && AIError.isContextOverflow(assistantFailure, currentModel.contextWindow ?? 0))
+		) {
+			return false;
+		}
 
-		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
+		const accountPolicyDenial = AIError.is(errorId, AIError.Flag.AccountPolicy);
+		if (accountPolicyDenial) {
+			const switched = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
+				currentModel.provider,
+				advisor.providerSessionId,
+				{ error: message, modelId: currentModel.id, signal },
+			);
+			if (switched) return true;
+		}
 
 		const retryAfterMs = extractRetryHint(undefined, message);
-		if (
+		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
-			isUsageLimitOutcome(extractHttpStatusFromError(error), message)
-		) {
+			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
+		if (usageLimit) {
 			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
 				currentModel.provider,
 				advisor.providerSessionId,
@@ -1220,6 +1215,9 @@ export class SessionAdvisors {
 			);
 			if (outcome.switched) return true;
 		}
+		if (!assistantFailure && !accountPolicyDenial && !usageLimit) return false;
+
+		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
 
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;

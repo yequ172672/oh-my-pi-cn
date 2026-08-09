@@ -990,17 +990,19 @@ function extractStatusFromAssistantError(message: AssistantMessage): number | un
 function isRetryableUpstreamError(error: unknown, status: number | undefined, message: string | undefined): boolean {
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
-	// not share it). Usage-limit phrasing (Codex's
+	// not share it). Explicit account-scoped policy errors such as Codex
+	// `cyber_policy` are likewise rotatable: another account may carry the
+	// required approval. Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
 	// without transient rate-limit wording mean this account is parked but a
 	// sibling credential can usually pick the request up. Both are rotatable
-	// via `onAuthError` — the auth-gateway maps the former to
-	// `invalidateCredentialMatching` and the latter to
-	// `markUsageLimitReached`. Transient 429s ("Too many requests",
-	// per-minute caps) classify as RATE_LIMIT_EXCEEDED in
-	// `parseRateLimitReason` and stay in the provider's own backoff layer
-	// instead of burning siblings.
+	// via `onAuthError` — the auth-gateway maps hard auth failures to
+	// `invalidateCredentialMatching` and temporary account constraints to a
+	// credential block. Transient 429s ("Too many requests", per-minute caps)
+	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
+	// provider's own backoff layer instead of burning siblings.
+	if (AIError.isAccountPolicyError(error)) return true;
 	if (AIError.isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;

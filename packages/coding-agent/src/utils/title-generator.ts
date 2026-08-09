@@ -6,6 +6,7 @@ import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -533,6 +534,7 @@ function emitTerminalTitle(): void {
 			terminalTitleRuntime.state,
 			terminalTitleRuntime.frame,
 			terminalTitleRuntime.enabled,
+			isConPTYHosted() ? "win32" : process.platform,
 		);
 	setTerminalTitle(next);
 }
@@ -543,7 +545,7 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (process.platform === "win32" || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
 		emitTerminalTitle();

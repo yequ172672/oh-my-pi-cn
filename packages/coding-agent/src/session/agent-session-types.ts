@@ -45,6 +45,12 @@ export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
 	/**
+	 * Deadline for the settle/drain wait before the terminal memory release
+	 * (default 5s). The bounded-teardown paths (signal handlers, tests) may
+	 * shorten it; late event handlers are still finalized after they settle.
+	 */
+	drainTimeoutMs?: number;
+	/**
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal

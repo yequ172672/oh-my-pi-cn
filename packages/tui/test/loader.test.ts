@@ -140,7 +140,7 @@ describe("Loader component", () => {
 		const ui = {
 			synchronizedOutput: true,
 			requestDirectWrite: vi.fn(() => {
-				now += 20;
+				now += 40;
 			}),
 			requestComponentRender: vi.fn(),
 		};
@@ -153,9 +153,9 @@ describe("Loader component", () => {
 		vi.advanceTimersByTime(34);
 		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(2);
 
-		vi.advanceTimersByTime(170);
+		vi.advanceTimersByTime(200);
 		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(2);
-		vi.advanceTimersByTime(10);
+		vi.advanceTimersByTime(160);
 		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(3);
 
 		loader.stop();

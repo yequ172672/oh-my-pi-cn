@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [17.2.12] - 2026-08-08
+
+### Breaking Changes
+
+- `PUT N.=M @name` over a *span* now throws when `@name` was never captured, instead of warning and deleting the range. Pasting a never-captured register over a span wrote nothing back, so a mistyped or hallucinated register name silently destroyed content. Gap pastes (`PUT >N @name`) keep the warned no-op behaviour from 17.2.11.
+
+### Added
+
+- `applyEdits` now takes a `path` and uses the native tree-sitter parser to decide every boundary repair that depends on delimiter *semantics*. The authored edits are materialized first: if that result parses, it is returned untouched, so a `}` inside a regex literal, a string, or Markdown prose is never mistaken for a block closer. A closer-spare repair lands only when the repaired result is *shown* to parse — never on delimiter arithmetic alone — so an unrecognized language or an unprovable candidate leaves the edit exactly as authored. Wired through the patcher, recovery, section apply, and the edit tool's preview.
+- Auto-repair for replacement ranges that start one line early on a structural closer (the `}` of the construct above): the closer is spared and the payload lands after it, gated on the same parse proof.
+- Warning for balanced payloads over ranges that end mid-block (deleting opener(s) whose closer(s) survive below), pointing at the block-op remedy (`PUT N*:`). Raised only when the baseline parsed and the authored result does not, so it cannot fire on prose or an unknown language.
+- Warning when a `+` body row is itself a valid hunk header (`+CUT 5.=9`). Such a row is literal content by definition and is inserted into the file as text; naming it at the moment it happens turns a silent source-file corruption into an actionable diagnostic.
+
+### Fixed
+
+- Rejected patches whose pasted `N:TEXT` read-output rows repeat a source line number. Each such row is recovered as a single-line `PUT N.=N:`, so a body written as consecutive lines under one number collapsed through the same-range coalescer, keeping only the last row and silently dropping the rest — in one incident replacing a block opener with `}` and deleting the following statement. The error now names the repeated line and teaches the explicit `PUT` form.
+
 ## [17.2.11] - 2026-08-07
 
 ### Changed
