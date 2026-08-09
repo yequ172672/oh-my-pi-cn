@@ -3,13 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as gitUtils from "../packages/coding-agent/src/utils/git";
+import { parseStableForkReleaseTag } from "./fork-release-identity";
 import type { ForkReleaseMetadata } from "./publish-fork-package";
 import {
 	assessExistingReleaseState,
 	finalizeForkChangelog,
 	formatReleaseRecoveryError,
 	parseReleaseForkOptions,
-	parseStableForkReleaseTag,
 	validateCheckoutVersions,
 	validateGitReleaseIdentity,
 	validateRecoverableReleaseCommit,

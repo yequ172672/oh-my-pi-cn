@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import * as gitUtils from "../packages/coding-agent/src/utils/git.ts";
 import { compareVersions } from "../packages/utils/src/version.ts";
+import { isStableForkVersion, parseStableForkReleaseTag } from "./fork-release-identity";
 import {
 	assertSecureTlsEnvironment,
 	type ForkManifestMetadata,
@@ -51,19 +52,8 @@ export interface RecoverableReleaseCommitSnapshot {
 	version: string;
 }
 
-const STABLE_VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const EXPECTED_ORIGIN = "github.com/yequ172672/oh-my-pi-cn";
 const EXPECTED_UPSTREAM = "github.com/can1357/oh-my-pi";
-
-export function parseStableForkReleaseTag(tag: string): string {
-	const prefix = "omp-cn-v";
-	if (!tag.startsWith(prefix)) throw new Error(`Fork release tag must start with ${prefix}`);
-	const version = tag.slice(prefix.length);
-	if (!STABLE_VERSION_PATTERN.test(version)) {
-		throw new Error(`Fork release tag must contain a stable X.Y.Z version: ${tag}`);
-	}
-	return version;
-}
 
 export function validateCheckoutVersions(metadata: ForkReleaseMetadata, snapshot: CheckoutVersionSnapshot): void {
 	const failures: string[] = [];
@@ -200,7 +190,7 @@ export function parseReleaseForkOptions(argv: readonly string[]): ReleaseForkOpt
 		["upstreamVersion", metadata.upstreamVersion],
 		["nativeVersion", metadata.nativeVersion],
 	] as const) {
-		if (!STABLE_VERSION_PATTERN.test(version)) {
+		if (!isStableForkVersion(version)) {
 			throw new Error(`${field} must be a stable X.Y.Z version for a stable fork release`);
 		}
 	}
