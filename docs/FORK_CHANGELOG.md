@@ -12,6 +12,7 @@
 ### 变更
 
 - GitHub 仓库启用 Issues 与 Discussions，并补充统一的项目简介和技术主题标签。
+- 更新 GitHub Actions 缓存步骤到 Node.js 24 兼容版本，消除即将失效的 Node.js 20 运行时警告。
 
 ## [17.2.12] - 2026-08-09
 
