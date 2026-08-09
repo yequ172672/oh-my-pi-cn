@@ -1,17 +1,22 @@
-## What
+## 改了什么
 
-<!-- Brief description of the change -->
+<!-- 请用自己的话说明本次改动。不要只粘贴自动生成摘要。 -->
 
-## Why
+## 为什么
 
-<!-- Motivation, context, or link to issue (fixes #N) -->
+<!-- 描述用户问题、维护需要或关联 Issue（例如：Fixes #123）。 -->
 
-## Testing
+## 如何验证
 
-<!-- How was this tested? -->
+<!-- 写出真实执行的场景、命令和结果。用户可见变化请附截图或终端输出。 -->
+
+## 与上游的关系
+
+<!-- 这是本地化/omp-cn 发行专属改动，还是也应提交给 can1357/oh-my-pi？ -->
 
 ---
 
-- [ ] `bun check` passes
-- [ ] Tested locally
-- [ ] CHANGELOG updated (if user-facing)
+- [ ] 我已检查完整 diff，没有无关文件、密钥或个人信息
+- [ ] 我已执行与改动风险匹配的检查，并亲自验证用户可见结果
+- [ ] 本地化改动保留英文 fallback，没有翻译命令、路径或动态错误详情
+- [ ] 用户可见变更已更新 `docs/FORK_CHANGELOG.md`（不适用时可不勾选）

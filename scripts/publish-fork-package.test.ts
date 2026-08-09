@@ -6,6 +6,7 @@ import { $ } from "bun";
 import {
 	assertSecureTlsEnvironment,
 	createForkManifest,
+	FORK_HOMEPAGE,
 	FORK_NPM_PACKAGE,
 	FORK_PACKAGE_DESCRIPTION,
 	FORK_REPOSITORY,
@@ -53,7 +54,7 @@ describe("fork npm package manifest", () => {
 		expect(manifest.version).toBe(metadata.forkVersion);
 		expect(manifest.description).toBe(FORK_PACKAGE_DESCRIPTION);
 		expect(manifest.license).toBe("MIT");
-		expect(manifest.homepage).toBe(`https://github.com/${FORK_REPOSITORY}`);
+		expect(manifest.homepage).toBe(FORK_HOMEPAGE);
 		expect(manifest.repository).toEqual({
 			type: "git",
 			url: `git+https://github.com/${FORK_REPOSITORY}.git`,

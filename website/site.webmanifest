@@ -1,0 +1,18 @@
+{
+  "name": "oh-my-pi-cn — Oh My Pi 中文版",
+  "short_name": "oh-my-pi-cn",
+  "description": "持续同步上游的 Oh My Pi 简体中文本地化分支。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#09080f",
+  "theme_color": "#09080f",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

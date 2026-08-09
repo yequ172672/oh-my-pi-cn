@@ -35,6 +35,8 @@ git merge --no-ff --no-commit upstream/main
 4. `src/distribution.ts`、`fork-release.json`、更新器和安装器中的 `omp-cn` 身份。
 5. 上游新增用户可见英文的 fallback，以及 `zh-CN` 资源中的对应翻译。
 
+README、`CONTRIBUTING.md`、`.github/ISSUE_TEMPLATE/`、`CODE_OF_CONDUCT.md`、`SUPPORT.md`、`docs/CONTRIBUTOR_TASKS.md`、`website/` 和 Pages workflow 属于中文分支的社区与传播入口。同步上游时应吸收适用的事实和质量规则，但不得把中文参与入口、`omp-cn` 身份或分支网站覆盖回上游地址。
+
 不要为了中文发行修改 workspace、Cargo 或 native 版本；版本协议见维护文档。
 
 合并和适配后至少执行：

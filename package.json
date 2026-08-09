@@ -1,7 +1,7 @@
 {
   "name": "omp",
   "description": "面向中文用户的终端 AI 编程代理，提供简体中文界面、供应商配置、模型思考等级、提示和独立的 omp-cn 安装更新体验",
-  "homepage": "https://github.com/yequ172672/oh-my-pi-cn",
+  "homepage": "https://yequ172672.github.io/oh-my-pi-cn/",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",
@@ -121,6 +121,7 @@
     "fix:changelogs": "bun scripts/fix-changelogs.ts",
     "fix:rs": "bun scripts/run-rs-task.ts fix:rs",
     "ci:check:full": "bun run check:ts",
+    "ci:site": "bun scripts/validate-community-site.ts",
     "ci:test:full": "bun run ci:test:ts && bun run test:rs",
     "ci:test:ts": "bun scripts/ci-test-ts.ts all",
     "ci:test:ts:workspace": "bun scripts/ci-test-ts.ts workspace",

@@ -1,11 +1,14 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
-  - name: Model Configuration
+  - name: 使用问题与想法讨论
+    url: https://github.com/yequ172672/oh-my-pi-cn/discussions
+    about: 配置求助、开放想法和使用交流请优先进入 Discussions
+  - name: 模型与供应商配置
     url: https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/models.md
-    about: How to add custom providers and models via models.yml
-  - name: Extensions Guide
+    about: 查看自定义供应商和 models.yml 配置说明
+  - name: 扩展与技能文档
     url: https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/extensions.md
-    about: Build custom tools, commands, and integrations
-  - name: Skills Documentation
-    url: https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/skills.md
-    about: How to create and use skills
+    about: 开发自定义工具、命令、集成和技能
+  - name: 安全漏洞私下报告
+    url: https://github.com/yequ172672/oh-my-pi-cn/security/advisories/new
+    about: 不要公开披露漏洞、密钥或账号信息

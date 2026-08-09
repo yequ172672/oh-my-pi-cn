@@ -1,18 +1,23 @@
-# Security Policy
+# 安全政策
 
-## Supported Versions
+## 支持范围
 
-Only the latest release is supported with security updates.
+仅最新的 `omp-cn` 稳定版本接收中文分支安全修复。若漏洞来自上游核心代码，维护者会协调在上游修复并同步到本分支。
 
-## Reporting a Vulnerability
+## 私下报告漏洞
 
-To report a security issue, either:
+请使用本仓库的 [GitHub 私有安全通告](https://github.com/yequ172672/oh-my-pi-cn/security/advisories/new) 报告漏洞。
 
-- Email can1357 directly, or
-- Open a [private security advisory](https://github.com/yequ172672/oh-my-pi-cn/security/advisories/new) on GitHub
+报告中请包含：
 
-Include steps to reproduce and any relevant details. Do not open a public issue for security vulnerabilities.
+- 受影响版本和平台；
+- 最小复现步骤及实际影响；
+- 已确认的攻击前提或限制；
+- 建议修复（如果已有）；
+- 是否已经向上游或其他相关方报告。
 
-## Response
+不要在公开 Issue、Discussion、Pull Request、日志或截图中泄露漏洞细节、令牌、账号、私人仓库和用户数据。
 
-Reports are handled on a best-effort basis. You can expect an initial acknowledgment within a few days.
+## 响应
+
+维护者会尽力在 3 个工作日内确认收到报告，并根据影响范围决定由中文分支、上游或双方协同处理。在修复公开前，请给维护者合理的协调和发布窗口。

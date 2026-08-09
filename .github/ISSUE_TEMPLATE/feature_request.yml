@@ -1,48 +1,61 @@
-name: Feature Request
-description: Suggest a new feature or improvement
-labels: ["enhancement"]
+name: 改进建议
+description: 提议范围明确的中文本地化、文档或安装体验改进
+title: "[建议] "
+labels: ["enhancement", "needs-triage"]
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: Description
-      description: What would you like?
+      value: |
+        尚未形成具体方案的开放想法，请先放到 Discussions。
+        核心产品功能通常应在上游 can1357/oh-my-pi 讨论和实现。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 当前体验哪里不清楚、不自然或不可用？请描述真实使用场景。
     validations:
       required: true
 
   - type: textarea
-    id: use-case
+    id: outcome
     attributes:
-      label: Use Case
-      description: Why is this needed? What problem does it solve?
+      label: 期望结果
+      description: 完成后用户应该能够观察到什么变化？
     validations:
       required: true
 
   - type: dropdown
     id: area
     attributes:
-      label: Area
-      description: Which part of omp does this relate to?
+      label: 改进范围
       options:
-        - Provider / Model support
-        - TUI / Display
-        - Tools
-        - MCP servers
-        - Extensions / Plugins
-        - CLI commands
-        - Skills / Commands
-        - Session management
-        - Configuration
-        - Other
+        - 中文界面或提示
+        - 供应商 / 模型配置
+        - 安装 / 更新
+        - 中文文档
+        - 网站 / 演示素材
+        - 测试 / 平台验证
+        - 上游同步适配
+        - 其他
+    validations:
+      required: true
 
   - type: textarea
-    id: proposed-solution
+    id: proposal
     attributes:
-      label: Proposed Solution
-      description: How would you implement this? Link to relevant docs or APIs if applicable.
+      label: 建议方案
+      description: 如果已有思路，请说明最小实现和验证方式。
 
   - type: textarea
-    id: alternatives
+    id: upstream
     attributes:
-      label: Alternatives Considered
-      description: Any workarounds or other approaches you've tried?
+      label: 与上游的关系
+      description: 说明这是中文分支特有需求，还是也应该提交给官方项目。
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: 参与意愿
+      options:
+        - label: 我愿意提交 Pull Request 实现或验证这项改进。

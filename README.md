@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omp-cn"><img src="https://img.shields.io/npm/v/omp-cn?style=flat&colorA=222222&colorB=CB3837" alt="npm 版本"></a>
+  <a href="https://yequ172672.github.io/oh-my-pi-cn/"><img src="https://img.shields.io/badge/website-访问-9F6BF4?style=flat&colorA=222222" alt="项目网站"></a>
   <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/FORK_CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="变更日志"></a>
   <a href="https://github.com/yequ172672/oh-my-pi-cn/actions"><img src="https://img.shields.io/github/actions/workflow/status/yequ172672/oh-my-pi-cn/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="持续集成"></a>
   <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/LICENSE"><img src="https://img.shields.io/github/license/yequ172672/oh-my-pi-cn?style=flat&colorA=222222&colorB=58A6FF" alt="许可证"></a>
@@ -28,6 +29,8 @@
 本仓库是 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 的简体中文本地化分支，
 由 yequ172672 维护，B 站 ID：夜曲_flac。分支在保留上游核心能力和提交历史的基础上，
 持续同步上游更新，并将中文用户实际使用到的界面、提示和安装体验作为重点维护范围。
+项目也可通过 `ohmypi-cn`、`omp-cn` 或“Oh My Pi 中文版”搜索；完整介绍见
+[项目网站](https://yequ172672.github.io/oh-my-pi-cn/)。
 
 当前分支的特色包括：
 
@@ -661,9 +664,16 @@ bun dev -- --version
 
 ## 参与贡献
 
-欢迎提交 Issue 和 Pull Request。涉及上游核心能力的改动，请同时关注
-can1357/oh-my-pi 的实现和更新；涉及中文界面、提示、供应商向导与安装体验的改动，
-可直接在本分支提出。具体方式见 **[CONTRIBUTING.md](CONTRIBUTING.md)**。
+欢迎参与中文校对、平台安装验证、供应商文档、演示素材和上游新增文本审查。第一次参与不需要理解整个代码库，可以从
+[可认领的维护任务](docs/CONTRIBUTOR_TASKS.md) 或带有
+[`good first issue`](https://github.com/yequ172672/oh-my-pi-cn/issues?q=is%3Aissue+label%3A%22good+first+issue%22) 标签的任务开始。
+
+- [Issues](https://github.com/yequ172672/oh-my-pi-cn/issues)：可复现问题和范围明确的维护任务；
+- [Discussions](https://github.com/yequ172672/oh-my-pi-cn/discussions)：使用问答、开放想法和社区交流；
+- [中文贡献指南](CONTRIBUTING.md)：开发环境、本地化边界、验证和 Pull Request 要求；
+- [社区行为规范](CODE_OF_CONDUCT.md) 与 [支持入口](SUPPORT.md)。
+
+涉及上游核心能力的改动，请同时关注 can1357/oh-my-pi 的实现和更新；涉及中文界面、提示、供应商向导、文档与安装体验的改动，可直接在本分支提出。
 
 维护、上游同步、冲突处理、本地化适配、npm 发布和 GitHub Release 的操作说明见
 **[中文分支维护与发布流程](docs/MAINTENANCE.md)**。
@@ -694,6 +704,9 @@ _为始终保持打开的终端而作_
 
 - [上游项目主页](https://omp.sh)
 - [GitHub 仓库](https://github.com/yequ172672/oh-my-pi-cn)
+- [项目网站](https://yequ172672.github.io/oh-my-pi-cn/)
+- [参与维护](https://github.com/yequ172672/oh-my-pi-cn/blob/main/CONTRIBUTING.md)
+- [社区讨论](https://github.com/yequ172672/oh-my-pi-cn/discussions)
 - [中文分支变更日志](https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/FORK_CHANGELOG.md)
 - [上游包变更日志](https://github.com/yequ172672/oh-my-pi-cn/blob/main/packages/coding-agent/CHANGELOG.md)
 - [npm 软件包](https://www.npmjs.com/package/omp-cn)

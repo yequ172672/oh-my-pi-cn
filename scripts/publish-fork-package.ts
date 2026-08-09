@@ -14,6 +14,7 @@ import { applyPublishBin, packages } from "./ci-release-publish.ts";
 
 export const FORK_NPM_PACKAGE = "omp-cn";
 export const FORK_REPOSITORY = "yequ172672/oh-my-pi-cn";
+export const FORK_HOMEPAGE = "https://yequ172672.github.io/oh-my-pi-cn/";
 export const FORK_PACKAGE_DESCRIPTION =
 	"omp coding agent 的简体中文本地化分支，包含设置、供应商配置、提示和 CLI 文案中文化";
 
@@ -86,7 +87,7 @@ export function createForkManifest(manifest: Manifest, metadata: ForkReleaseMeta
 		description: FORK_PACKAGE_DESCRIPTION,
 		author: "yequ172672",
 		contributors: ["Mario Zechner", "Can Boluk"],
-		homepage: `https://github.com/${FORK_REPOSITORY}`,
+		homepage: FORK_HOMEPAGE,
 		repository: {
 			type: "git",
 			url: `git+https://github.com/${FORK_REPOSITORY}.git`,
@@ -109,7 +110,7 @@ export function validateForkManifest(manifest: Manifest, metadata: ForkReleaseMe
 	if (manifest.version !== metadata.forkVersion) failures.push(`version=${String(manifest.version)}`);
 	if (manifest.bin?.omp !== "dist/cli.js") failures.push(`bin.omp=${String(manifest.bin?.omp)}`);
 	if (manifest.license !== "MIT") failures.push(`license=${String(manifest.license)}`);
-	if (manifest.homepage !== `https://github.com/${FORK_REPOSITORY}`) failures.push("homepage");
+	if (manifest.homepage !== FORK_HOMEPAGE) failures.push("homepage");
 	if (
 		manifest.repository?.type !== "git" ||
 		manifest.repository.url !== expectedRepository ||

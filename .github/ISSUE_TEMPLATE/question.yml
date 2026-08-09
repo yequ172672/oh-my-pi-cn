@@ -1,38 +1,48 @@
-name: Question
-description: Ask about usage or configuration
-labels: ["question"]
+name: 文档缺口
+description: 报告无法通过现有中文文档解决的明确问题
+title: "[文档] "
+labels: ["documentation", "needs-triage"]
 body:
-  - type: textarea
-    id: question
+  - type: markdown
     attributes:
-      label: Question
+      value: |
+        一般使用问题请优先前往 Discussions 的 Q&A 分类。本模板用于记录能够转化为文档改进的缺口。
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 你想完成什么
+      description: 描述目标和使用场景。
     validations:
       required: true
 
   - type: textarea
-    id: context
+    id: missing
     attributes:
-      label: Context
-      description: What are you trying to do?
+      label: 现有文档缺少什么
+      description: 请链接已经阅读的页面，并说明仍然不清楚的步骤。
+    validations:
+      required: true
 
   - type: dropdown
     id: area
     attributes:
-      label: Topic
+      label: 主题
       options:
-        - Provider setup / Login
-        - Custom models (models.yml)
-        - Extensions
-        - MCP servers
-        - Skills / Commands
-        - Configuration
-        - Other
+        - 安装 / 更新
+        - 供应商登录
+        - 自定义模型（models.yml）
+        - 扩展
+        - MCP 服务
+        - 技能 / 命令
+        - 配置
+        - 参与贡献
+        - 其他
+    validations:
+      required: true
 
-  - type: dropdown
-    id: environment
+  - type: textarea
+    id: suggestion
     attributes:
-      label: Platform
-      options:
-        - macOS
-        - Linux
-        - Windows
+      label: 建议补充的内容
+      description: 如果愿意，请给出你认为最有帮助的示例或解释。

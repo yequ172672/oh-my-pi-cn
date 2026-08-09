@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://yequ172672.github.io/oh-my-pi-cn/sitemap.xml

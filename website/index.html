@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>oh-my-pi-cn — Oh My Pi 中文版终端 AI 编程代理</title>
+    <meta
+      name="description"
+      content="oh-my-pi-cn（omp-cn）是持续同步上游的 Oh My Pi 简体中文本地化分支，提供中文界面、供应商配置、独立安装更新和跨平台 Release。"
+    >
+    <meta
+      name="keywords"
+      content="oh-my-pi-cn, ohmypi-cn, omp-cn, Oh My Pi 中文版, AI 编程代理, terminal coding agent"
+    >
+    <meta name="theme-color" content="#09080f">
+    <meta name="color-scheme" content="dark">
+    <link rel="canonical" href="https://yequ172672.github.io/oh-my-pi-cn/">
+    <link rel="icon" href="./icon.svg" type="image/svg+xml">
+    <link rel="manifest" href="./site.webmanifest">
+
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="zh_CN">
+    <meta property="og:site_name" content="oh-my-pi-cn">
+    <meta property="og:title" content="oh-my-pi-cn — Oh My Pi 中文版">
+    <meta
+      property="og:description"
+      content="把完整的 Oh My Pi 带进中文终端：中文界面、独立 omp-cn 安装更新，并持续同步上游。"
+    >
+    <meta property="og:url" content="https://yequ172672.github.io/oh-my-pi-cn/">
+    <meta property="og:image" content="https://yequ172672.github.io/oh-my-pi-cn/og-social.jpg">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="oh-my-pi-cn — Oh My Pi 中文版">
+    <meta
+      name="twitter:description"
+      content="持续同步上游的终端 AI 编程代理中文本地化分支。"
+    >
+    <meta name="twitter:image" content="https://yequ172672.github.io/oh-my-pi-cn/og-social.jpg">
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "oh-my-pi-cn",
+        "alternateName": ["omp-cn", "ohmypi-cn", "Oh My Pi 中文版"],
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "description": "持续同步上游的 Oh My Pi 简体中文本地化分支，提供中文界面、独立安装更新和跨平台 Release。",
+        "url": "https://yequ172672.github.io/oh-my-pi-cn/",
+        "downloadUrl": "https://www.npmjs.com/package/omp-cn",
+        "codeRepository": "https://github.com/yequ172672/oh-my-pi-cn",
+        "isBasedOn": "https://github.com/can1357/oh-my-pi",
+        "license": "https://github.com/yequ172672/oh-my-pi-cn/blob/main/LICENSE",
+        "programmingLanguage": ["TypeScript", "Rust"]
+      }
+    </script>
+
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="返回首页">
+        <span class="brand-mark" aria-hidden="true">π</span>
+        <span>oh-my-pi-cn</span>
+      </a>
+      <nav class="site-nav" aria-label="主导航">
+        <a href="#why">分支特色</a>
+        <a href="#install">安装</a>
+        <a href="#contribute">参与维护</a>
+      </nav>
+      <a class="header-link" href="https://github.com/yequ172672/oh-my-pi-cn">GitHub ↗</a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="ambient ambient-one" aria-hidden="true"></div>
+        <div class="ambient ambient-two" aria-hidden="true"></div>
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> 非官方简体中文本地化分支 · 持续同步上游</p>
+          <h1 id="hero-title">在中文终端里，<br>完整使用 <em>Oh My Pi</em>。</h1>
+          <p class="hero-lead">
+            <strong>oh-my-pi-cn</strong>（也可搜索 ohmypi-cn，npm 包名为 <strong>omp-cn</strong>）保留上游完整能力，
+            聚焦中文界面、供应商配置、安装更新和真实跨平台体验。
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#install">立即安装</a>
+            <a class="button button-secondary" href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md">查看可认领任务</a>
+          </div>
+          <p class="microcopy">Windows · macOS · Linux · Bun ≥ 1.3.14</p>
+        </div>
+
+        <div class="terminal-shell" aria-label="omp-cn 安装和启动示例">
+          <div class="terminal-bar">
+            <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>terminal — omp-cn</span>
+            <span class="terminal-status">ZH-CN</span>
+          </div>
+          <div class="terminal-body">
+            <p><span class="prompt">$</span> bun install -g omp-cn</p>
+            <p class="terminal-muted">已安装 omp-cn，命令：omp</p>
+            <p><span class="prompt">$</span> omp</p>
+            <p class="terminal-accent">欢迎使用 Oh My Pi 中文版</p>
+            <div class="terminal-grid">
+              <span>供应商</span><b>60+</b>
+              <span>内置工具</span><b>31</b>
+              <span>LSP 操作</span><b>14</b>
+              <span>DAP 操作</span><b>28</b>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof-strip" aria-label="项目能力摘要">
+        <p>基于 <a href="https://github.com/can1357/oh-my-pi">can1357/oh-my-pi</a></p>
+        <span></span>
+        <p>TypeScript + Rust</p>
+        <span></span>
+        <p>MCP · LSP · DAP · Subagents</p>
+        <span></span>
+        <p>独立 npm 与 Release</p>
+      </section>
+
+      <section class="section why" id="why" aria-labelledby="why-title">
+        <div class="section-heading">
+          <p class="section-index">01 / 为什么是中文分支</p>
+          <h2 id="why-title">中文不是一层皮，<br>而是一条完整使用路径。</h2>
+          <p>从首次安装到模型登录、设置、提示和升级，重要步骤都以中文表达，同时让上游核心能力保持可追踪、可合并。</p>
+        </div>
+
+        <div class="feature-list">
+          <article>
+            <p class="feature-number">01</p>
+            <div>
+              <h3>界面与提示本地化</h3>
+              <p>覆盖设置中心、首次启动、模型思考等级、常用操作和关键状态；动态错误和命令保留必要原文。</p>
+            </div>
+          </article>
+          <article>
+            <p class="feature-number">02</p>
+            <div>
+              <h3>独立安装与更新</h3>
+              <p>通过 <code>omp-cn</code>、安装脚本或 Release 安装，更新器和包身份都指向中文分支。</p>
+            </div>
+          </article>
+          <article>
+            <p class="feature-number">03</p>
+            <div>
+              <h3>持续跟进上游</h3>
+              <p>核心逻辑、接口、依赖和测试语义以上游为准，中文差异集中在本地化和发行边界。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="showcase" aria-label="Oh My Pi 终端 AI 编程代理预览">
+        <img
+          src="./hero.png"
+          alt="Oh My Pi 终端 AI 编程代理，支持 MCP、LSP、子代理和网页搜索"
+          width="1500"
+          height="540"
+          loading="lazy"
+        >
+      </section>
+
+      <section class="section install" id="install" aria-labelledby="install-title">
+        <div class="section-heading">
+          <p class="section-index">02 / 安装</p>
+          <h2 id="install-title">一条命令，进入中文终端工作流。</h2>
+          <p>如果已经全局安装官方包，请先卸载；官方包和中文包都会提供 <code>omp</code> 命令，不建议同时保留。</p>
+        </div>
+
+        <div class="install-panel">
+          <div class="install-tabs" aria-label="选择包管理器">
+            <button type="button" class="active" data-install-command="bun install -g omp-cn" aria-pressed="true">Bun</button>
+            <button type="button" data-install-command="npm install -g omp-cn" aria-pressed="false">npm</button>
+          </div>
+          <div class="copy-row">
+            <code id="install-command">bun install -g omp-cn</code>
+            <button type="button" data-copy-target="install-command" aria-label="复制安装命令">复制</button>
+          </div>
+          <div class="install-links">
+            <a href="https://github.com/yequ172672/oh-my-pi-cn#安装">查看全部安装方式</a>
+            <a href="https://github.com/yequ172672/oh-my-pi-cn/releases/latest">下载最新 Release</a>
+            <a href="https://www.npmjs.com/package/omp-cn">查看 npm 包</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section contribute" id="contribute" aria-labelledby="contribute-title">
+        <div class="section-heading">
+          <p class="section-index">03 / 参与维护</p>
+          <h2 id="contribute-title">不必读完整个代码库，<br>从一个可验证的小任务开始。</h2>
+          <p>中文校对、平台验证、供应商文档、上游新增文本审查都能直接改善真实用户体验。</p>
+        </div>
+
+        <div class="contribution-tracks">
+          <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md#中文本地化">
+            <span>I18N</span>
+            <h3>中文校对</h3>
+            <p>排查遗漏文本，改善术语和窄终端显示。</p>
+            <b>查看任务 →</b>
+          </a>
+          <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md#安装与平台验证">
+            <span>TEST</span>
+            <h3>平台验证</h3>
+            <p>验证 Windows、macOS、Linux、WSL 或 Alpine。</p>
+            <b>查看任务 →</b>
+          </a>
+          <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md#文档与演示">
+            <span>DOCS</span>
+            <h3>文档与演示</h3>
+            <p>补充配置示例、截图和短演示。</p>
+            <b>查看任务 →</b>
+          </a>
+          <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md#上游同步与质量">
+            <span>SYNC</span>
+            <h3>上游同步审查</h3>
+            <p>识别新增用户可见文本并验证本地化边界。</p>
+            <b>查看任务 →</b>
+          </a>
+        </div>
+
+        <div class="contribute-footer">
+          <a class="button button-primary" href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/CONTRIBUTING.md">阅读贡献指南</a>
+          <a class="text-link" href="https://github.com/yequ172672/oh-my-pi-cn/discussions">进入 Discussions ↗</a>
+        </div>
+      </section>
+
+      <section class="closing" aria-labelledby="closing-title">
+        <p class="eyebrow"><span></span> OPEN SOURCE · MIT</p>
+        <h2 id="closing-title">让优秀的终端 Agent，<br>也拥有自然的中文体验。</h2>
+        <p>安装、使用、验证，或者修好一个小地方。每一种参与都会让下一位中文开发者少绕一点路。</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="https://github.com/yequ172672/oh-my-pi-cn">访问 GitHub</a>
+          <a class="button button-secondary" href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/CONTRIBUTOR_TASKS.md">领取第一个任务</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div>
+        <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">π</span><span>oh-my-pi-cn</span></a>
+        <p>Oh My Pi 非官方简体中文本地化分支。</p>
+      </div>
+      <nav aria-label="页脚导航">
+        <a href="https://github.com/yequ172672/oh-my-pi-cn">GitHub</a>
+        <a href="https://www.npmjs.com/package/omp-cn">npm</a>
+        <a href="https://github.com/yequ172672/oh-my-pi-cn/releases">Release</a>
+        <a href="https://github.com/can1357/oh-my-pi">上游项目</a>
+      </nav>
+      <p>© <span data-current-year>2026</span> yequ172672 · MIT License</p>
+    </footer>
+  </body>
+</html>

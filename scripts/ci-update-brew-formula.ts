@@ -12,7 +12,7 @@
 import { $ } from "bun";
 
 const REPO = process.env.OMP_REPO ?? "yequ172672/oh-my-pi-cn";
-const HOMEPAGE = "https://github.com/yequ172672/oh-my-pi-cn";
+const HOMEPAGE = "https://yequ172672.github.io/oh-my-pi-cn/";
 const DESC = "Coding agent with the IDE wired in";
 
 interface ReleaseAsset {

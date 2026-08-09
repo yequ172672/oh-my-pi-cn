@@ -150,6 +150,8 @@ git merge --no-ff --no-commit upstream/main
 - `packages/coding-agent/src/distribution.ts` 和 `fork-release.json`；
 - `scripts/install.*`、fork 打包/发行脚本；
 - README、`docs/LOCALIZATION.md` 和本文；
+- `CONTRIBUTING.md`、社区健康文件、Issue/PR 模板和 `docs/CONTRIBUTOR_TASKS.md`；
+- `website/`、Pages workflow、站点 canonical/结构化数据和 `omp-cn` 社区入口；
 - `omp-cn` registry/repository/update URL，不得退回官方包身份。
 
 完成适配后才提交 merge。提交前保存 `git diff --stat $base` 和上游完整 SHA。
@@ -196,6 +198,7 @@ git diff --check
 | native/Rust/optional 依赖 | `ci:test:coding-agent:native`、Rust 测试及平台矩阵 |
 | 更新、发行元数据、打包 | distribution/update/publish/release 专项测试与 fork dry-run |
 | 安装器或二进制 | 安装器行为测试、`ci:test:install-methods` 和目标平台 smoke |
+| README、社区入口或网站 | YAML/HTML/JSON/XML 语法、内部链接、canonical/OG/sitemap URL、移动端布局和 Pages workflow；不需要冒充完整代码矩阵 |
 | 大范围上游合并 | 可用的完整 TS/Rust 矩阵；未运行项必须在记录中标为未验证，不能写“全部通过” |
 
 `test:scripts` 中可能包含平台专属或上游已知不稳定测试，不能用一个聚合命令掩盖结果。CI 和记录必须列出实际执行的测试文件及失败归属。
@@ -203,6 +206,15 @@ git diff --check
 当前 GitHub-hosted Linux 无法提供 `shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline` 所需的 stopped-pipeline 会话语义；在有/无 Bazel sandbox、5/15 秒上限下都稳定失败，而同一目标其余 918 项通过。因此 hosted Rust job 明确标为 **limited**，运行其他全部 Rust targets 和 `pi-shell_test` 的其余用例，并把这一项记录为未验证，不能写“完整 Rust 矩阵通过”。任何触及 `crates/pi-shell` job-control、进程组、STOP/CONT 或 jobspec 的变更都必须在兼容 Linux runner 上补跑该精确用例；没有证据时发行状态为 **BLOCKED**。
 
 人工 TUI 验收使用临时 profile/目录，不先运行会覆盖现有全局 `omp` 的 `bun setup`。至少检查首次启动、语言切换、设置页、供应商向导、错误提示和非交互命令。
+
+### 7.1 社区与网站发布
+
+- GitHub 仓库必须保持 Issues 与 Discussions 开启，Topics、简介、README 和网站使用一致的 `oh-my-pi-cn` / `omp-cn` / “Oh My Pi 中文版”身份。
+- root、coding-agent、fork 打包清单和可选 Homebrew 元数据的 homepage 统一指向项目网站，repository/bugs 仍指向 GitHub；网站域名变化时同步更新对应合同测试。
+- `website/` 是无构建依赖的静态站点，发布入口为 `.github/workflows/pages.yml`，只上传该目录，不能把仓库、凭据或构建产物整体发布。提交前及 workflow 中运行 `bun run ci:site`，验证 HTML 元数据、结构化数据、内部资源、YAML、sitemap 和社交图合同。
+- 站点 canonical、Open Graph、JSON-LD、`robots.txt` 和 `sitemap.xml` 统一指向 `https://yequ172672.github.io/oh-my-pi-cn/`；更换域名时必须一次性更新并验证全部入口。
+- Pages workflow 成功后才能把 GitHub Homepage 改为站点 URL。站点尚未部署、部署失败或返回 404 时不得提前制造公开死链。
+- 每次站点变更检查桌面和窄屏内容层级、键盘焦点、安装命令、贡献链接、社交预览图和外部链接。公开页面只面向最终用户与贡献者，不写入内部制作过程。
 
 ## 8. 精确制品准备与验证
 
