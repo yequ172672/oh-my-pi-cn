@@ -774,14 +774,14 @@ jobs:
            env:
               GH_TOKEN: ${{ github.token }}
               RELEASE_TAG: ${{ needs.resolve.outputs.release-tag }}
-           run: gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+           run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
          - name: Verify the public stable latest release
            env:
               GH_TOKEN: ${{ github.token }}
               RELEASE_TAG: ${{ needs.resolve.outputs.release-tag }}
            run: |
               set -euo pipefail
-              [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == false ]]
-              [[ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" == false ]]
+              [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" == false ]]
+              [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" == false ]]
               [[ "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" == "$RELEASE_TAG" ]]
               echo "GitHub Release and npm state match the completed fork release transaction."
