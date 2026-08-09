@@ -699,7 +699,7 @@ jobs:
               RELEASE_VERSION: ${{ needs.resolve.outputs.release-version }}
            run: |
               set -euo pipefail
-              tarball="release-package/omp-cn-${RELEASE_VERSION}.tgz"
+              tarball="$PWD/release-package/omp-cn-${RELEASE_VERSION}.tgz"
               test -f "$tarball"
 
               tar -xOzf "$tarball" package/package.json > "$RUNNER_TEMP/local-manifest.json"
