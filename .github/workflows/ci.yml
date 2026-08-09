@@ -356,7 +356,7 @@ jobs:
    release_package:
       name: Pack the verified omp-cn tarball
       if: needs.resolve.outputs.is-release == 'true'
-      needs: [resolve, release_gate]
+      needs: [resolve, release_gate, native_addons]
       runs-on: ubuntu-22.04
       timeout-minutes: 25
       steps:
@@ -365,6 +365,9 @@ jobs:
               ref: ${{ needs.resolve.outputs.sha }}
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
          - name: Pack and isolated-install smoke the release tarball
            run: bun scripts/publish-fork-package.ts --pack --output release-package
          - name: Upload the exact npm artifact
