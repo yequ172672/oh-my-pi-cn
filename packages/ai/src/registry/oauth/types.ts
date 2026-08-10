@@ -5,6 +5,12 @@ export type OAuthCredentials = {
 	refresh: string;
 	access: string;
 	expires: number;
+	/**
+	 * External owner of refresh-token rotation. `codex-cli` credentials keep the
+	 * real refresh token in Codex's own auth store; OMP asks `codex app-server`
+	 * to return the current short-lived access token and rotate it when needed.
+	 */
+	credentialSource?: "codex-cli";
 	enterpriseUrl?: string;
 	projectId?: string;
 	email?: string;
@@ -68,6 +74,8 @@ export interface OAuthProviderInfo {
 	 * entry back to the model provider it authenticates.
 	 */
 	storeCredentialsAs?: string;
+	/** Login must execute on the local interactive OMP host, never through auth-broker. */
+	loginLocalOnly?: boolean;
 }
 
 export interface OAuthController {
@@ -93,4 +101,6 @@ export interface OAuthProviderInterface {
 	getApiKey?(credentials: OAuthCredentials): string;
 	/** Store resulting OAuth credentials under a different provider id. */
 	readonly storeCredentialsAs?: string;
+	/** Login requires machine-local state and is unavailable to auth-broker. */
+	readonly loginLocalOnly?: boolean;
 }

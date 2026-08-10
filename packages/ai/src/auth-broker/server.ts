@@ -759,6 +759,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				const refreshMatch = req.method === "POST" ? pathname.match(REFRESH_ROUTE) : null;
 				if (refreshMatch) {
 					const id = Number.parseInt(refreshMatch[1], 10);
+					if (!opts.storage.exportSnapshot().credentials.some(entry => entry.id === id)) {
+						logger.info("auth-broker refresh miss", { id, peer });
+						return json(404, { error: `No credential with id=${id}` });
+					}
 					try {
 						const entry = await opts.storage.refreshCredentialById(id, req.signal);
 						const body: CredentialRefreshResponse = { entry };
@@ -779,6 +783,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				const disableMatch = req.method === "POST" ? pathname.match(DISABLE_ROUTE) : null;
 				if (disableMatch) {
 					const id = Number.parseInt(disableMatch[1], 10);
+					if (!opts.storage.exportSnapshot().credentials.some(entry => entry.id === id)) {
+						logger.info("auth-broker disable miss", { id, peer });
+						return json(404, { error: `No credential with id=${id}` });
+					}
 					const parsed = await parseBody(req, getAuthBrokerWireSchemas().credentialDisableRequestSchema, {
 						allowEmpty: true,
 					});

@@ -45,6 +45,10 @@ function isCredentialInAccountPool(
 	accountPool: AuthBrokerAccountPool | undefined,
 ): boolean {
 	if (entry.credential.type !== "oauth") return true;
+	// Codex CLI is a machine-local refresh owner. Even a legacy or manually
+	// inserted broker row must not make its short-lived bearer visible to a
+	// remote client, because that client cannot prove source-machine affinity.
+	if (entry.credential.credentialSource === "codex-cli") return false;
 	const identities = accountPool?.get(entry.provider);
 	if (identities === undefined) return true;
 	return entry.identityKey !== null && identities.has(entry.identityKey);
@@ -925,6 +929,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			access: refreshed.access,
 			refresh: REMOTE_REFRESH_SENTINEL,
 			expires: refreshed.expires,
+			credentialSource: refreshed.credentialSource ?? _credential.credentialSource,
 			accountId: refreshed.accountId,
 			email: refreshed.email,
 			projectId: refreshed.projectId,

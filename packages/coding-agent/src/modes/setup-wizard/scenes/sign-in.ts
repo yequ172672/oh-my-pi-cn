@@ -1,5 +1,6 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { resolveOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	type Component,
@@ -242,7 +243,10 @@ export class SignInTab implements SetupTab {
 			});
 			// Provider-scoped online refresh so the just-persisted credential re-runs
 			// discovery instead of reusing a fresh authoritative cache row (#5780).
-			await this.host.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			await this.host.ctx.session.modelRegistry.refreshProvider(
+				resolveOAuthCredentialProvider(providerId),
+				"online",
+			);
 			if (this.#disposed) return;
 			this.#statusLines = [
 				theme.fg("success", `${theme.status.success} ${localizeUiText("Signed in to")} ${providerId}`),

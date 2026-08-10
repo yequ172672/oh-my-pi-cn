@@ -30,6 +30,12 @@ describe("SelectorController login", () => {
 		const authStorage = {
 			login: vi.fn(async () => {
 				loginSaved.resolve();
+				return {
+					type: "oauth" as const,
+					accountId: "private-account-id",
+					orgId: "private-workspace-id",
+					orgName: "pro",
+				};
 			}),
 		} as unknown as AuthStorage;
 		const refresh = vi.fn(() => new Promise<void>(() => {}));
@@ -60,17 +66,21 @@ describe("SelectorController login", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new SelectorController(ctx);
 
-		void controller.showOAuthSelector("login", "xai-oauth");
+		void controller.showOAuthSelector("login", "openai-codex-cli");
 		await loginSaved.promise;
 		// Let the awaited refreshProvider settle before the success block is presented.
 		await Promise.resolve();
 		await Promise.resolve();
 
-		expect(renderPresented(presentedBlocks)).toContain("Successfully logged in to xai-oauth");
+		expect(renderPresented(presentedBlocks)).toContain("Successfully logged in to openai-codex-cli");
+		expect(renderPresented(presentedBlocks)).toContain("as pro");
+		expect(renderPresented(presentedBlocks)).not.toContain("private-account-id");
+		expect(renderPresented(presentedBlocks)).not.toContain("private-workspace-id");
 		// Post-login refresh is scoped to the just-authenticated provider with the
-		// `online` strategy (#5780) — not the all-provider default refresh.
+		// `online` strategy (#5780). Login-only aliases resolve to the credential
+		// owner whose model catalog actually needs refresh.
 		expect(refreshProvider).toHaveBeenCalledTimes(1);
-		expect(refreshProvider).toHaveBeenCalledWith("xai-oauth", "online");
+		expect(refreshProvider).toHaveBeenCalledWith("openai-codex", "online");
 		expect(refresh).not.toHaveBeenCalled();
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});

@@ -1,4 +1,4 @@
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthProviders, resolveOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	Container,
@@ -133,7 +133,10 @@ export class OAuthSelectorComponent extends Container {
 		this.#updateList();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
-		return this.#mode === "logout" ? this.#authStorage.has(providerId) : this.#authStorage.hasAuth(providerId);
+		const credentialProvider = resolveOAuthCredentialProvider(providerId);
+		return this.#mode === "logout"
+			? providerId === credentialProvider && this.#authStorage.has(providerId)
+			: this.#authStorage.hasAuth(credentialProvider);
 	}
 
 	#loadProviders(): void {
@@ -222,7 +225,7 @@ export class OAuthSelectorComponent extends Container {
 	 * the list distinguishes a real login from an env var aliasing the provider.
 	 */
 	#getSourceLabel(providerId: string): string {
-		const origin = this.#authStorage.getCredentialOrigin(providerId);
+		const origin = this.#authStorage.getCredentialOrigin(resolveOAuthCredentialProvider(providerId));
 		if (!origin) return "";
 		const detail =
 			origin.kind === "env" && origin.envVar
@@ -266,7 +269,7 @@ export class OAuthSelectorComponent extends Container {
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
 		let text = `${provider.name} ${provider.id}`;
-		const origin = this.#authStorage.getCredentialOrigin(provider.id);
+		const origin = this.#authStorage.getCredentialOrigin(resolveOAuthCredentialProvider(provider.id));
 		if (origin) {
 			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
 			if (origin.envVar) text += ` ${origin.envVar}`;

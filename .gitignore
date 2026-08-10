@@ -90,3 +90,6 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-pi
 /bazel-oh-my-pi
 /.bazelrc.user
+
+# Local reference repositories used for implementation research
+/参考项目/

@@ -112,4 +112,26 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 		expect(persisted?.refresh).toBe("refresh-rotated");
 		expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(1);
 	});
+
+	test("never migrates a machine-local Codex CLI credential", async () => {
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			localStore.upsertAuthCredentialForProvider("openai-codex", {
+				type: "oauth",
+				access: "short-lived-local-access",
+				refresh: "__codex_cli_managed__",
+				expires: Date.now() + 3_600_000,
+				credentialSource: "codex-cli",
+				accountId: "local-account",
+			});
+		} finally {
+			localStore.close();
+		}
+
+		const output = await runMigrateCapturingStdout();
+
+		expect(output).toContain("machine-local Codex login cannot be migrated to auth-broker");
+		expect(output).toContain("Nothing to migrate");
+		expect(brokerStore!.getOAuth("openai-codex")).toBeNull();
+	});
 });

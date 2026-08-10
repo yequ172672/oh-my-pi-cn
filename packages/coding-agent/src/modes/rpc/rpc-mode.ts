@@ -11,7 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthProviders, resolveOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
@@ -1386,7 +1386,7 @@ export async function runRpcMode(
 					id: provider.id,
 					name: provider.name,
 					available: provider.available,
-					authenticated: session.modelRegistry.authStorage.hasAuth(provider.id),
+					authenticated: session.modelRegistry.authStorage.hasAuth(resolveOAuthCredentialProvider(provider.id)),
 				}));
 				return success(id, "get_login_providers", { providers });
 			}
@@ -1434,7 +1434,10 @@ export async function runRpcMode(
 					// Provider-scoped online refresh so the just-persisted credential
 					// re-runs discovery instead of reusing a fresh authoritative cache
 					// row (#5780).
-					await session.modelRegistry.refreshProvider(command.providerId, "online");
+					await session.modelRegistry.refreshProvider(
+						resolveOAuthCredentialProvider(command.providerId),
+						"online",
+					);
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));

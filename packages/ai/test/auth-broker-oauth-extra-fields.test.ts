@@ -9,6 +9,7 @@ import {
 	RemoteAuthCredentialStore,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
+import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
 
 // MCP OAuth credentials extend the base OAuthCredential with refresh material
@@ -18,6 +19,7 @@ import { removeWithRetries } from "../../utils/src/temp";
 // (`.strict()` rejected unknown keys), so a broker-backed reauth reported
 // success while the reloaded credential could no longer refresh.
 const MCP_PROVIDER = "mcp_oauth:profile:default:https://mcp.example.com/sse?project_ref=abc";
+const CLI_FIXTURE_SOURCE = "auth-broker-codex-cli-local-only";
 const EXTRA_FIELDS = {
 	tokenUrl: "https://mcp.example.com/oauth/token",
 	clientId: "client-xyz",
@@ -65,6 +67,7 @@ describe("auth-broker preserves extra OAuth credential fields", () => {
 	});
 
 	afterEach(async () => {
+		unregisterOAuthProviders(CLI_FIXTURE_SOURCE);
 		clientStorage?.close();
 		await handle?.close();
 		serverStorage?.close();
@@ -98,5 +101,84 @@ describe("auth-broker preserves extra OAuth credential fields", () => {
 		const localView = remote!.listAuthCredentials(MCP_PROVIDER);
 		expect(localView).toHaveLength(1);
 		expect(localView[0].credential as unknown as Record<string, unknown>).toMatchObject(EXTRA_FIELDS);
+	});
+
+	test("broker snapshots exclude a legacy machine-local Codex credential", async () => {
+		await serverStorage!.set("openai-codex", {
+			type: "oauth",
+			access: "short-lived-access",
+			refresh: "__codex_cli_managed__",
+			expires: Date.now() + 60_000,
+			credentialSource: "codex-cli",
+		});
+
+		const persisted = serverStore!.getOAuth("openai-codex");
+		expect(persisted).toMatchObject({ credentialSource: "codex-cli" });
+		const legacyRow = serverStore!.listAuthCredentials("openai-codex")[0];
+		if (!legacyRow) throw new Error("expected legacy local credential");
+
+		expect(serverStorage!.exportSnapshot().credentials).not.toContainEqual(
+			expect.objectContaining({ provider: "openai-codex" }),
+		);
+
+		const snapshotResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (snapshotResult.status !== 200) throw new Error("expected snapshot");
+		const entry = snapshotResult.snapshot.credentials.find(candidate => candidate.provider === "openai-codex");
+		expect(entry).toBeUndefined();
+
+		await remote!.refreshSnapshot();
+		await clientStorage!.reload();
+		expect(remote!.listAuthCredentials("openai-codex")).toHaveLength(0);
+		expect(clientStorage!.has("openai-codex")).toBe(false);
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		await expect(brokerClient.refreshCredential(legacyRow.id)).rejects.toMatchObject({ status: 404 });
+		await expect(brokerClient.disableCredential(legacyRow.id, "remote delete attempt")).rejects.toMatchObject({
+			status: 404,
+		});
+		expect(serverStore!.listAuthCredentials("openai-codex")).toHaveLength(1);
+	});
+
+	test("refuses to upload a machine-local Codex login through a remote broker", async () => {
+		await expect(
+			clientStorage!.set("openai-codex", {
+				type: "oauth",
+				access: "short-lived-access",
+				refresh: "__codex_cli_managed__",
+				expires: Date.now() + 60_000,
+				credentialSource: "codex-cli",
+				accountId: "account-123",
+			}),
+		).rejects.toThrow(/local-only.*remote auth broker/i);
+
+		await expect(
+			new AuthBrokerClient({ url: handle!.url, token }).uploadCredential("openai-codex", {
+				type: "oauth",
+				access: "short-lived-access",
+				refresh: "__codex_cli_managed__",
+				expires: Date.now() + 60_000,
+				credentialSource: "codex-cli",
+				accountId: "account-123",
+			}),
+		).rejects.toMatchObject({ status: 500 });
+
+		registerOAuthProvider({
+			id: "fixture-local-codex-cli",
+			name: "Fixture local Codex CLI",
+			sourceId: CLI_FIXTURE_SOURCE,
+			storeCredentialsAs: "openai-codex",
+			login: async () => ({
+				access: "short-lived-access",
+				refresh: "__codex_cli_managed__",
+				expires: Date.now() + 60_000,
+				credentialSource: "codex-cli",
+				accountId: "account-123",
+			}),
+		});
+
+		await expect(
+			clientStorage!.login("fixture-local-codex-cli", { onAuth: () => {}, onPrompt: async () => "" }),
+		).rejects.toThrow(/local-only.*remote auth broker/i);
+		expect(serverStore!.getOAuth("openai-codex")).toBeNull();
 	});
 });

@@ -16,6 +16,37 @@ afterEach(() => {
 });
 
 describe("SignInTab", () => {
+	it("refreshes the credential-owning provider after an alias login", async () => {
+		const refreshProvider = vi.fn(async () => {});
+		const authStorage = {
+			has: (_providerId: string) => false,
+			hasAuth: (_providerId: string) => false,
+			getCredentialOrigin: (_providerId: string) => undefined,
+			async login(): Promise<void> {},
+		} as unknown as AuthStorage;
+		const host = {
+			ctx: {
+				openInBrowser(): void {},
+				session: { modelRegistry: { authStorage, refreshProvider } },
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(): void {},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+		const tab = new SignInTab(host);
+		try {
+			for (const char of "openai-codex-cli") tab.handleInput(char);
+			tab.handleInput("\n");
+			for (let attempt = 0; attempt < 10 && refreshProvider.mock.calls.length === 0; attempt += 1) {
+				await Promise.resolve();
+			}
+			expect(refreshProvider).toHaveBeenCalledWith("openai-codex", "online");
+		} finally {
+			tab.dispose();
+		}
+	});
+
 	it("keeps the OSC8 login link and manual-code prompt above clipped wizard rows", async () => {
 		const url = `https://example.com/oauth/authorize?client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A45454%2Fcallback&state=${"a".repeat(96)}`;
 		const loginGate = Promise.withResolvers<void>();

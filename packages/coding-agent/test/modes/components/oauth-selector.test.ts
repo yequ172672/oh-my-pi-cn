@@ -104,6 +104,41 @@ describe("OAuthSelectorComponent", () => {
 		expect(selected).toEqual(["opencode-go"]);
 	});
 
+	it("shows login-only aliases as authenticated by their credential owner without duplicating logout rows", () => {
+		const loggedInStorage = {
+			has: (providerId: string) => providerId === "openai-codex",
+			hasAuth: (providerId: string) => providerId === "openai-codex",
+			getCredentialOrigin: (providerId: string) => (providerId === "openai-codex" ? { kind: "oauth" } : undefined),
+		} as unknown as AuthStorage;
+
+		const login = new OAuthSelectorComponent(
+			"login",
+			loggedInStorage,
+			() => {},
+			() => {},
+		);
+		for (const char of "openai-codex-cli") login.handleInput(char);
+		const loginRendered = login
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(loginRendered).toContain("Existing Codex CLI login");
+		expect(loginRendered).toContain("logged in");
+
+		const logout = new OAuthSelectorComponent(
+			"logout",
+			loggedInStorage,
+			() => {},
+			() => {},
+		);
+		const logoutRendered = logout
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(logoutRendered).toContain("ChatGPT Plus/Pro (Codex Subscription)");
+		expect(logoutRendered).not.toContain("Existing Codex CLI login");
+	});
+
 	describe("disabledProviders", () => {
 		afterEach(() => {
 			resetSettingsForTest();

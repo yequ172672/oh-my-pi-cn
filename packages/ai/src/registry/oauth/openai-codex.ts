@@ -3,6 +3,7 @@
  */
 
 import { OPENAI_HEADER_VALUES } from "@oh-my-pi/pi-catalog/wire/codex";
+import { $which, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
@@ -27,8 +28,15 @@ const DEVICE_POLL_INTERVAL_MS = 5_000;
 const DEVICE_POLL_SAFETY_MARGIN_MS = 3_000;
 /** Upper bound on device-code polling to avoid infinite loops on server errors. */
 const DEVICE_MAX_POLLS = 120;
+const CODEX_APP_SERVER_TIMEOUT_MS = 20_000;
+const CODEX_APP_SERVER_EXIT_TIMEOUT_MS = 2_000;
+const CODEX_CLI_REFRESH_SKEW_MS = 5 * 60_000;
+
+/** Marker stored in OMP instead of copying Codex's single-use refresh token. */
+export const CODEX_CLI_MANAGED_REFRESH_SENTINEL = "__codex_cli_managed__";
 
 type JwtPayload = {
+	exp?: number;
 	[JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: string;
 		chatgpt_plan_type?: string;
@@ -73,6 +81,219 @@ function getTokenProfile(
 		email: typeof email === "string" && email.length > 0 ? email : undefined,
 		planType: typeof planType === "string" && planType.length > 0 ? planType : undefined,
 	};
+}
+
+export interface CodexCliRefreshOptions {
+	readManagedCredentials?: (refreshToken: boolean, signal?: AbortSignal) => Promise<OAuthCredentials>;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Parse the short-lived access token returned by Codex app-server. OMP never
+ * reads Codex's refresh token or depends on whether Codex stores it in a file
+ * or the OS keyring.
+ */
+export function parseOpenAICodexCliAuthStatus(value: unknown): OAuthCredentials {
+	if (!isRecord(value) || value.authMethod !== "chatgpt") {
+		throw new AIError.OAuthError("Codex CLI is not logged in with ChatGPT", { kind: "validation" });
+	}
+	const accessToken = nonEmptyString(value.authToken);
+	if (!accessToken) {
+		throw new AIError.OAuthError("Codex CLI did not provide a usable ChatGPT access token", {
+			kind: "validation",
+		});
+	}
+
+	const payload = decodeJwt<JwtPayload>(accessToken);
+	const expires = typeof payload?.exp === "number" && Number.isFinite(payload.exp) ? payload.exp * 1000 : undefined;
+	if (!expires) {
+		throw new AIError.OAuthError("Codex CLI access token has no usable expiry claim", { kind: "validation" });
+	}
+
+	const profile = getTokenProfile(accessToken);
+	const accountId = profile.accountId;
+	if (!accountId) {
+		throw new AIError.OAuthError("Codex CLI access token has no ChatGPT account id", { kind: "validation" });
+	}
+
+	return {
+		access: accessToken,
+		refresh: CODEX_CLI_MANAGED_REFRESH_SENTINEL,
+		expires,
+		credentialSource: "codex-cli",
+		accountId,
+		email: profile.email,
+		orgId: accountId,
+		orgName: profile.planType,
+	};
+}
+
+interface CodexAppServerMessage {
+	id?: unknown;
+	result?: unknown;
+	error?: unknown;
+}
+
+async function nextCodexAppServerResponse(
+	messages: AsyncIterator<unknown>,
+	id: number,
+): Promise<CodexAppServerMessage> {
+	for (;;) {
+		const next = await messages.next();
+		if (next.done) {
+			throw new AIError.OAuthError("Codex app-server closed before returning authentication status", {
+				kind: "token-refresh",
+			});
+		}
+		if (!isRecord(next.value) || next.value.id !== id) continue;
+		return next.value;
+	}
+}
+
+/** Read a short-lived bearer while Codex remains the sole refresh-token owner. */
+export async function readOpenAICodexCliCredentials(
+	refreshToken: boolean,
+	callerSignal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	const executable = $which("codex");
+	if (!executable) {
+		throw new AIError.OAuthError("Codex CLI executable was not found in PATH", { kind: "token-refresh" });
+	}
+
+	const timeoutSignal = AbortSignal.timeout(CODEX_APP_SERVER_TIMEOUT_MS);
+	const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
+	const processHandle = Bun.spawn([executable, "app-server", "--listen", "stdio://"], {
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "ignore",
+		env: { ...process.env, RUST_LOG: "off" },
+	});
+	const input = processHandle.stdin;
+	const messages = readJsonl<unknown>(processHandle.stdout as ReadableStream<Uint8Array>, signal)[
+		Symbol.asyncIterator
+	]();
+	try {
+		input.write(
+			`${JSON.stringify({
+				method: "initialize",
+				id: 1,
+				params: { clientInfo: { name: "omp", title: "Oh My Pi", version: "1" } },
+			})}\n`,
+		);
+		await input.flush();
+		const initialize = await nextCodexAppServerResponse(messages, 1);
+		if (initialize.error !== undefined) {
+			throw new AIError.OAuthError("Codex app-server rejected auth bridge initialization", {
+				kind: "token-refresh",
+			});
+		}
+
+		input.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
+		input.write(
+			`${JSON.stringify({
+				method: "getAuthStatus",
+				id: 2,
+				params: { includeToken: true, refreshToken },
+			})}\n`,
+		);
+		await input.flush();
+		const status = await nextCodexAppServerResponse(messages, 2);
+		if (status.error !== undefined) {
+			throw new AIError.OAuthError("Installed Codex does not support sharing its current ChatGPT access token", {
+				kind: "token-refresh",
+			});
+		}
+		return parseOpenAICodexCliAuthStatus(status.result);
+	} catch (error) {
+		if (callerSignal?.aborted) {
+			throw new AIError.AbortError("Codex app-server authentication request aborted by caller");
+		}
+		if (timeoutSignal.aborted) {
+			throw new AIError.OAuthError("Codex app-server authentication request timed out", {
+				kind: "token-refresh",
+			});
+		}
+		throw error;
+	} finally {
+		try {
+			input.end();
+		} catch {
+			// Process may already have closed its stdin after an initialization error.
+		}
+		try {
+			processHandle.kill();
+		} catch {
+			// Process may already have exited after returning the response.
+		}
+		const exited = processHandle.exited.then(
+			() => true,
+			() => true,
+		);
+		const exitedGracefully = await Promise.race([
+			exited,
+			Bun.sleep(CODEX_APP_SERVER_EXIT_TIMEOUT_MS).then(() => false),
+		]);
+		if (!exitedGracefully) {
+			try {
+				processHandle.kill(9);
+			} catch {
+				// Process may have exited between the bounded wait and forced termination.
+			}
+			await Promise.race([exited, Bun.sleep(CODEX_APP_SERVER_EXIT_TIMEOUT_MS)]);
+		}
+	}
+}
+
+/**
+ * Refresh an OMP credential linked to Codex CLI. A fresh bearer already held
+ * by Codex wins; only an expired/near-expiry bearer requests rotation.
+ */
+export async function refreshOpenAICodexCliToken(
+	_credentials: OAuthCredentials,
+	options: CodexCliRefreshOptions = {},
+): Promise<OAuthCredentials> {
+	const readManagedCredentials = options.readManagedCredentials ?? readOpenAICodexCliCredentials;
+	let current = await readManagedCredentials(false);
+	if (_credentials.accountId && current.accountId !== _credentials.accountId) {
+		throw new AIError.OAuthError(
+			"Codex CLI is now logged in to a different ChatGPT account; run the existing Codex CLI login again in OMP to confirm the new binding",
+			{ kind: "token-refresh" },
+		);
+	}
+	if (current.expires > Date.now() + CODEX_CLI_REFRESH_SKEW_MS) return current;
+
+	current = await readManagedCredentials(true);
+	if (_credentials.accountId && current.accountId !== _credentials.accountId) {
+		throw new AIError.OAuthError(
+			"Codex CLI switched ChatGPT accounts during refresh; run the existing Codex CLI login again in OMP to confirm the new binding",
+			{ kind: "token-refresh" },
+		);
+	}
+	if (current.expires <= Date.now() + CODEX_CLI_REFRESH_SKEW_MS) {
+		throw new AIError.OAuthError("Codex CLI did not provide a fresh access token", { kind: "token-refresh" });
+	}
+	return current;
+}
+
+/** Reuse the current Codex CLI ChatGPT login without browser OAuth. */
+export async function loginOpenAICodexCli(
+	options: OAuthController & CodexCliRefreshOptions,
+): Promise<OAuthCredentials> {
+	options.signal?.throwIfAborted();
+	options.onProgress?.("Reusing the existing Codex CLI ChatGPT login…");
+	const readManagedCredentials = options.readManagedCredentials ?? readOpenAICodexCliCredentials;
+	const credentials = await readManagedCredentials(false, options.signal);
+	if (credentials.expires > Date.now() + CODEX_CLI_REFRESH_SKEW_MS) return credentials;
+	const refreshed = await readManagedCredentials(true, options.signal);
+	if (refreshed.expires <= Date.now() + CODEX_CLI_REFRESH_SKEW_MS) {
+		throw new AIError.OAuthError("Codex CLI did not provide a fresh access token", { kind: "token-refresh" });
+	}
+	return refreshed;
 }
 
 interface PKCE {

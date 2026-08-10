@@ -179,7 +179,8 @@ async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
-	const providers = getOAuthProviders();
+	const allProviders = getOAuthProviders();
+	const providers = allProviders.filter(provider => provider.loginLocalOnly !== true);
 	let providerArg = flags.provider;
 	if (!providerArg) {
 		if (flags.via) {
@@ -189,12 +190,18 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		}
 		providerArg = await pickProviderInteractively(providers);
 	}
-	if (!providers.some(p => p.id === providerArg)) {
+	const selectedProvider = allProviders.find(provider => provider.id === providerArg);
+	if (!selectedProvider) {
 		throw new Error(
-			`Unknown OAuth provider '${providerArg}'. Known: ${providers
+			`Unknown OAuth provider '${providerArg}'. Known: ${allProviders
 				.map(p => p.id)
 				.sort()
 				.join(", ")}`,
+		);
+	}
+	if (selectedProvider.loginLocalOnly) {
+		throw new Error(
+			`OAuth provider '${providerArg}' is local-only. Use OMP /login on the Codex source machine; auth-broker cannot transfer this login.`,
 		);
 	}
 	if (flags.via) {
@@ -410,7 +417,7 @@ async function pickStoredProviderInteractively(providers: string[]): Promise<str
 }
 
 async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
-	const providers = getOAuthProviders();
+	const providers = getOAuthProviders().filter(provider => provider.loginLocalOnly !== true);
 	if (flags.json) {
 		process.stdout.write(`${JSON.stringify(providers.map(p => ({ id: p.id, name: p.name })))}\n`);
 		return;
@@ -761,6 +768,15 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				continue;
 			}
 			const identity = credentialIdentity(row.provider, row.credential);
+			if (row.credential.type === "oauth" && row.credential.credentialSource === "codex-cli") {
+				skipped.push({
+					source: "local-sqlite",
+					provider: row.provider,
+					identity,
+					reason: "machine-local Codex login cannot be migrated to auth-broker",
+				});
+				continue;
+			}
 			if (row.credential.type === "oauth" && flags.includeOauth !== true) {
 				skipped.push({
 					source: "local-sqlite",

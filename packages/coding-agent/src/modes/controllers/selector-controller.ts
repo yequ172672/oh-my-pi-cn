@@ -1,7 +1,7 @@
 import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthProviders, resolveOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
@@ -142,7 +142,7 @@ export class SelectorController {
 		await Promise.all(
 			oauthProviders.map(provider =>
 				this.ctx.session.modelRegistry
-					.getApiKeyForProvider(provider.id, this.ctx.session.sessionId)
+					.getApiKeyForProvider(resolveOAuthCredentialProvider(provider.id), this.ctx.session.sessionId)
 					.catch(() => undefined),
 			),
 		);
@@ -1698,13 +1698,22 @@ export class SelectorController {
 			// models would stay unavailable in-session (#5780). Unrelated providers
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
-			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			await this.ctx.session.modelRegistry.refreshProvider(resolveOAuthCredentialProvider(providerId), "online");
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
 			// immediately instead of silently replacing an existing registration.
-			const whoBase = identity?.type === "oauth" ? (identity.email ?? identity.accountId) : undefined;
-			const whoOrg = identity?.type === "oauth" ? (identity.orgName ?? identity.orgId) : undefined;
+			// The local Codex bridge does not surface raw account/workspace ids in
+			// the transcript; email and plan name are sufficient confirmation.
+			const showRawIdentity = providerId !== "openai-codex-cli";
+			const whoBase =
+				identity?.type === "oauth"
+					? (identity.email ?? (showRawIdentity ? identity.accountId : undefined))
+					: undefined;
+			const whoOrg =
+				identity?.type === "oauth"
+					? (identity.orgName ?? (showRawIdentity ? identity.orgId : undefined))
+					: undefined;
 			const who = whoBase ? ` as ${whoBase}${whoOrg ? ` (${whoOrg})` : ""}` : whoOrg ? ` as ${whoOrg}` : "";
 			block.addChild(
 				new Text(
@@ -1769,6 +1778,7 @@ export class SelectorController {
 	}
 
 	async #showOAuthLogoutAccountSelector(providerId: string): Promise<void> {
+		providerId = resolveOAuthCredentialProvider(providerId);
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		try {
 			await authStorage.reload();
@@ -1821,7 +1831,7 @@ export class SelectorController {
 			await this.#refreshOAuthProviderAuthState();
 			const oauthProviders = getOAuthProviders();
 			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.has(provider.id),
+				this.ctx.session.modelRegistry.authStorage.has(resolveOAuthCredentialProvider(provider.id)),
 			);
 			if (loggedInProviders.length === 0) {
 				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
@@ -1851,7 +1861,7 @@ export class SelectorController {
 				{
 					validateAuth: async (selectedProviderId: string) => {
 						const apiKey = await this.ctx.session.modelRegistry.getApiKeyForProvider(
-							selectedProviderId,
+							resolveOAuthCredentialProvider(selectedProviderId),
 							this.ctx.session.sessionId,
 						);
 						return !!apiKey;

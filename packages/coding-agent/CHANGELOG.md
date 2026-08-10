@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an `Existing Codex CLI login` entry to `/login`, allowing OMP to reuse the local Codex ChatGPT subscription and discover GPT-5.6 models without another browser sign-in.
+
 ### Changed
 
 - Separated the `omp-cn` distribution version from upstream workspace and native package versions, including schema-validated release metadata and fork-specific Git tags.

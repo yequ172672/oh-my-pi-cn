@@ -1,17 +1,46 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
+	CODEX_CLI_MANAGED_REFRESH_SENTINEL,
 	createOpenAICodexAuthorizationUrl,
 	formatOpenAICodexTokenEndpointError,
+	parseOpenAICodexCliAuthStatus,
+	readOpenAICodexCliCredentials,
+	refreshOpenAICodexCliToken,
 } from "@oh-my-pi/pi-ai/oauth/openai-codex";
 import { type RequestBody, transformRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { CodexApiError, parseCodexError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-handler";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { OPENAI_HEADER_VALUES } from "@oh-my-pi/pi-catalog/wire/codex";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
 
 const DEFAULT_PROMPT_PREFIX =
 	"You are an expert coding assistant. You help users with coding tasks by reading files, executing commands";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+function jwt(payload: Record<string, unknown>): string {
+	return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+}
+
+function codexCliAuthStatus(
+	expires: number,
+	accessLabel = "access",
+	accountId = "account-123",
+): Record<string, unknown> {
+	return {
+		authMethod: "chatgpt",
+		authToken: jwt({
+			exp: Math.floor(expires / 1000),
+			"https://api.openai.com/auth": { chatgpt_account_id: accountId, chatgpt_plan_type: "Pro" },
+			"https://api.openai.com/profile": { email: "User@Example.com" },
+			label: accessLabel,
+		}),
+	};
+}
 
 describe("openai-codex oauth", () => {
 	it("uses the same default originator for browser login and API requests", () => {
@@ -43,6 +72,155 @@ describe("openai-codex oauth", () => {
 		);
 
 		expect(detail).toBe("403 access_denied: Connector scope missing");
+	});
+
+	it("maps the official Codex app-server bearer to a CLI-managed credential", () => {
+		const credentials = parseOpenAICodexCliAuthStatus(codexCliAuthStatus(Date.now() + 60 * 60_000));
+
+		expect(credentials).toMatchObject({
+			credentialSource: "codex-cli",
+			refresh: CODEX_CLI_MANAGED_REFRESH_SENTINEL,
+			accountId: "account-123",
+			email: "user@example.com",
+			orgId: "account-123",
+			orgName: "pro",
+		});
+		expect(credentials.refresh).toBe(CODEX_CLI_MANAGED_REFRESH_SENTINEL);
+	});
+
+	it("rejects non-ChatGPT auth and responses that omit the access token", () => {
+		expect(() => parseOpenAICodexCliAuthStatus({ authMethod: "apiKey", authToken: "sk-test" })).toThrow(
+			/not logged in with ChatGPT/i,
+		);
+		expect(() => parseOpenAICodexCliAuthStatus({ authMethod: "chatgpt", authToken: null })).toThrow(
+			/did not provide a usable ChatGPT access token/i,
+		);
+	});
+
+	it("uses the Codex app-server auth protocol and closes the helper process", async () => {
+		const expires = Date.now() + 60 * 60_000;
+		const writes: string[] = [];
+		const killSignals: Array<number | NodeJS.Signals | undefined> = [];
+		const processExit = Promise.withResolvers<number>();
+		const output = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					new TextEncoder().encode(
+						`${JSON.stringify({ id: 1, result: {} })}\n${JSON.stringify({ id: 2, result: codexCliAuthStatus(expires) })}\n`,
+					),
+				);
+			},
+		});
+		const fakeProcess = {
+			stdin: {
+				write(value: string) {
+					writes.push(value);
+					return 1;
+				},
+				flush: async () => 0,
+				end: () => 0,
+			},
+			stdout: output,
+			exited: processExit.promise,
+			kill(signal?: number | NodeJS.Signals) {
+				killSignals.push(signal);
+				processExit.resolve(0);
+			},
+		};
+
+		vi.spyOn(piUtils, "$which").mockReturnValue("codex-test");
+		vi.spyOn(Bun, "spawn").mockReturnValue(fakeProcess as never);
+
+		const credentials = await readOpenAICodexCliCredentials(true);
+		const requests = writes
+			.join("")
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+
+		expect(requests).toEqual([
+			{
+				method: "initialize",
+				id: 1,
+				params: { clientInfo: { name: "omp", title: "Oh My Pi", version: "1" } },
+			},
+			{ method: "initialized", params: {} },
+			{ method: "getAuthStatus", id: 2, params: { includeToken: true, refreshToken: true } },
+		]);
+		expect(credentials).toMatchObject({ accountId: "account-123", credentialSource: "codex-cli" });
+		expect(killSignals).toEqual([undefined]);
+	});
+
+	it("asks Codex to refresh an expired source and adopts the returned access token", async () => {
+		const refreshRequests: boolean[] = [];
+		const credentials = await refreshOpenAICodexCliToken(
+			{
+				access: "stale-omp-copy",
+				refresh: CODEX_CLI_MANAGED_REFRESH_SENTINEL,
+				expires: Date.now() - 60_000,
+				credentialSource: "codex-cli",
+				accountId: "account-123",
+			},
+			{
+				readManagedCredentials: async refreshToken => {
+					refreshRequests.push(refreshToken);
+					return parseOpenAICodexCliAuthStatus(
+						codexCliAuthStatus(
+							refreshToken ? Date.now() + 60 * 60_000 : Date.now() - 60_000,
+							refreshToken ? "fresh" : "expired",
+						),
+					);
+				},
+			},
+		);
+
+		expect(refreshRequests).toEqual([false, true]);
+		expect(credentials.access).not.toBe("stale-omp-copy");
+		expect(credentials.refresh).toBe(CODEX_CLI_MANAGED_REFRESH_SENTINEL);
+		expect(credentials.credentialSource).toBe("codex-cli");
+		expect(credentials.expires).toBeGreaterThan(Date.now() + 5 * 60_000);
+	});
+
+	it("adopts a fresh official access token without forcing a refresh", async () => {
+		const refreshRequests: boolean[] = [];
+		const credentials = await refreshOpenAICodexCliToken(
+			{
+				access: "stale-omp-copy",
+				refresh: CODEX_CLI_MANAGED_REFRESH_SENTINEL,
+				expires: Date.now() - 60_000,
+				credentialSource: "codex-cli",
+				accountId: "account-123",
+			},
+			{
+				readManagedCredentials: async refreshToken => {
+					refreshRequests.push(refreshToken);
+					return parseOpenAICodexCliAuthStatus(codexCliAuthStatus(Date.now() + 60 * 60_000, "fresh"));
+				},
+			},
+		);
+
+		expect(refreshRequests).toEqual([false]);
+		expect(credentials.access).not.toBe("stale-omp-copy");
+	});
+
+	it("refuses to silently move an existing OMP binding to another Codex account", async () => {
+		await expect(
+			refreshOpenAICodexCliToken(
+				{
+					access: "old-account-access",
+					refresh: CODEX_CLI_MANAGED_REFRESH_SENTINEL,
+					expires: Date.now() - 60_000,
+					credentialSource: "codex-cli",
+					accountId: "account-123",
+				},
+				{
+					readManagedCredentials: async () =>
+						parseOpenAICodexCliAuthStatus(
+							codexCliAuthStatus(Date.now() + 60 * 60_000, "different", "account-456"),
+						),
+				},
+			),
+		).rejects.toThrow(/different ChatGPT account/i);
 	});
 });
 

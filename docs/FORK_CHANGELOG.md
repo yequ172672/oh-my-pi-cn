@@ -9,6 +9,7 @@
 - 增加面向搜索、安装和贡献者招募的 GitHub Pages 项目网站，以及独立的 Pages 发布流程和社交分享图。
 - 增加中文贡献指南、社区行为规范、支持入口、可认领维护任务和中文 Issue/PR 模板。
 - 增加 Google Search Console 所有权验证合同，用于提交 sitemap 和监控搜索收录状态。
+- 增加“使用现有 Codex CLI 登录”入口，通过本机 Codex App Server 复用 ChatGPT 订阅的短期访问令牌，并由 Codex 独占刷新凭据的存储与轮换。
 
 ### 变更
 

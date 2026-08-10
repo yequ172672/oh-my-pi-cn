@@ -45,7 +45,7 @@ import { nvidiaProvider } from "./nvidia";
 import { ollamaProvider } from "./ollama";
 import { ollamaCloudProvider } from "./ollama-cloud";
 import { openaiProvider } from "./openai";
-import { openaiCodexProvider } from "./openai-codex";
+import { openaiCodexCliProvider, openaiCodexProvider } from "./openai-codex";
 import { openaiCodexDeviceProvider } from "./openai-codex-device";
 import { opencodeGoProvider } from "./opencode-go";
 import { opencodeZenProvider } from "./opencode-zen";
@@ -86,6 +86,7 @@ import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
 const ALL = [
 	azureProvider,
 	openaiCodexProvider,
+	openaiCodexCliProvider,
 	anthropicProvider,
 	zaiProvider,
 	zaiCodingPlanProvider,
