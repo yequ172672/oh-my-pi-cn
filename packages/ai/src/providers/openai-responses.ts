@@ -1113,6 +1113,10 @@ export function buildParams(
 			filterReasoning: policy.reasoning.filterReasoningHistory,
 		},
 		includeThinkingSignatures: shouldReplayNativeHistory && !policy.reasoning.filterReasoningHistory,
+		requiresReasoningReplayForAllTurns:
+			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
+		requiresReasoningReplayForToolCalls:
+			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
 	});
 

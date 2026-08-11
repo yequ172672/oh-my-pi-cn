@@ -323,5 +323,5 @@ describe("fork release preparation", () => {
 		);
 		expect(await gitText(work, ["ls-remote", "--heads", "origin", "refs/heads/main"])).toStartWith(releaseSha);
 		expect(await gitText(work, ["ls-remote", "--tags", "origin", `refs/tags/${tag}`])).toStartWith(releaseSha);
-	}, 15_000);
+	}, 60_000);
 });

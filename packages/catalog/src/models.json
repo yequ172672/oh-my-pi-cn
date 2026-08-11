@@ -13793,11 +13793,8 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			},
 			"supportsComputerUse": false,
@@ -13809,7 +13806,7 @@
 			"api": "openai-completions",
 			"provider": "baseten",
 			"baseUrl": "https://inference.baseten.co/v1",
-			"reasoning": false,
+			"reasoning": true,
 			"input": [
 				"text"
 			],
@@ -13822,7 +13819,14 @@
 			"contextWindow": 1048576,
 			"maxTokens": 262144,
 			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			"supportsComputerUseConfig": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
 		}
 	},
 	"bedrock-mantle": {
@@ -16247,7 +16251,7 @@
 					"low",
 					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			}
 		}
@@ -21875,6 +21879,40 @@
 				}
 			},
 			"supportsComputerUse": false
+		},
+		"glm-5.2-fast": {
+			"id": "glm-5.2-fast",
+			"name": "GLM-5.2 Fast",
+			"api": "openai-completions",
+			"provider": "fireworks",
+			"baseUrl": "https://api.fireworks.ai/inference/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 2.1,
+				"output": 6.6,
+				"cacheRead": 0.21,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"max"
+				],
+				"effortMap": {
+					"minimal": "none"
+				}
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		}
 	},
 	"github-copilot": {
@@ -28443,7 +28481,7 @@
 					"low",
 					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			}
 		}
@@ -41080,6 +41118,74 @@
 				"input": 1.25,
 				"output": 4.25,
 				"cacheRead": 0.15,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsReasoningEffort": true,
+				"includeEncryptedReasoning": true
+			}
+		},
+		"muse-spark-1.2": {
+			"id": "muse-spark-1.2",
+			"name": "Muse Spark 1.2",
+			"api": "openai-responses",
+			"provider": "meta",
+			"baseUrl": "https://api.meta.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 1.25,
+				"output": 4.25,
+				"cacheRead": 0.15,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsReasoningEffort": true,
+				"includeEncryptedReasoning": true
+			}
+		},
+		"muse-spark-1.2-contributor": {
+			"id": "muse-spark-1.2-contributor",
+			"name": "Muse Spark 1.2 Contributor (Data Used for Training)",
+			"api": "openai-responses",
+			"provider": "meta",
+			"baseUrl": "https://api.meta.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.1,
+				"output": 0.2,
+				"cacheRead": 0.002,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -89008,7 +89114,7 @@
 					"low",
 					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			},
 			"supportsComputerUse": false,
@@ -90026,7 +90132,7 @@
 					"low",
 					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			}
 		}
@@ -100924,10 +101030,8 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
+					"high",
+					"max"
 				]
 			},
 			"supportsComputerUse": false,

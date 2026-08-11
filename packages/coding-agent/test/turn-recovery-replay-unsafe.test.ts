@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
@@ -43,11 +44,12 @@ function createHost(
 	options: {
 		fallbackChains?: Record<string, string[]>;
 		textOutputCommitted?: boolean;
+		messages?: readonly AgentMessage[];
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {});
 	return {
-		agent: undefined as never,
+		agent: (options.messages ? { state: { messages: options.messages } } : undefined) as never,
 		sessionManager: undefined as never,
 		persistedAssistantEntryId: () => undefined,
 		settings,
@@ -111,6 +113,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
 			activeModel = nextModel;
@@ -161,6 +164,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setThinkingLevel = level => thinkingChanges.push(level);
 		host.setModelWithProviderSessionReset = async nextModel => {
@@ -208,6 +212,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
 			activeModel = nextModel;
@@ -415,5 +420,99 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = createProviderErrorMessage(model, new Error("fetch failed"));
 		expect(recovery.isRetryableError(message)).toBe(true);
+	});
+
+	// Anthropic's request classifier can refuse AFTER the model streamed a tool
+	// call. Production shape (omp.2026-08-07 log): `stopDetails.type === "refusal"`,
+	// `errorId: 0` (no AIError flag, so `AIError.retriable` cannot rescue it), and
+	// the agent loop appends a synthetic `executed: false` result AFTER the refused
+	// assistant message, so state ends with `lastRole: "toolResult"`.
+	describe("classifier refusal with emitted tool calls", () => {
+		function makeRefusal(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.errorMessage =
+				"Refusal (cyber): This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy.";
+			message.stopDetails = { type: "refusal" };
+			message.errorId = 0;
+			return message;
+		}
+
+		function toolCall(id: string): AssistantMessage["content"][number] {
+			return { type: "toolCall", id, name: "read", arguments: { path: "https://developer.android.com/reference" } };
+		}
+
+		function syntheticResult(toolCallId: string): ToolResultMessage<SyntheticToolResultDetails> {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text: "Tool call was not executed." }],
+				isError: true,
+				details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+				timestamp: Date.now(),
+			};
+		}
+
+		function realResult(toolCallId: string): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text: "# Android reference" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		function recoveryFor(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("retries a refusal whose only tool call provably never executed", () => {
+			const message = makeRefusal([toolCall("call-1")]);
+			expect(message.errorId).toBe(0);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+		});
+
+		it("does not retry a refusal whose tool call produced a real result", () => {
+			const message = makeRefusal([toolCall("call-1")]);
+			expect(recoveryFor(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry a refusal when only some tool calls went unexecuted", () => {
+			const message = makeRefusal([toolCall("call-1"), toolCall("call-2")]);
+			const recovery = recoveryFor(message, [realResult("call-1"), syntheticResult("call-2")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry a refusal that also committed visible text", () => {
+			const message = makeRefusal([{ type: "text", text: "Let me fetch that page." }, toolCall("call-1")]);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry a refusal whose tool call has no result at all", () => {
+			const message = makeRefusal([toolCall("call-1")]);
+			expect(recoveryFor(message, []).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry a refusal when one call is synthetic-paired and another has no result", () => {
+			// Reachable in practice: the agent loop skips Cursor server-resolved calls
+			// when pairing synthetic results, so a turn can carry one accounted-for
+			// call beside one it never paired. Accounting for only some of them is
+			// not proof that none ran.
+			const message = makeRefusal([toolCall("call-1"), toolCall("call-2")]);
+			const recovery = recoveryFor(message, [syntheticResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+		});
+
+		it("keeps a refusal with no tool calls retriable (baseline)", () => {
+			const message = makeRefusal([{ type: "thinking", thinking: "reasoning before refusal" }]);
+			expect(recoveryFor(message, []).isRetryableError(message)).toBe(true);
+		});
+
+		it("keeps a non-refusal error with an unexecuted tool call non-retriable", () => {
+			const message = makeMessage([toolCall("call-1")], model);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
 	});
 });

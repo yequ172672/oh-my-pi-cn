@@ -553,6 +553,13 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
+	 * Accept a Google `STOP` response with no visible text or tool call as a
+	 * successful completion. Passive callers such as advisors use this because
+	 * silence is a valid result; interactive agent turns retain empty-response
+	 * retries by default. Ignored by non-Google providers.
+	 */
+	acceptEmptyResponse?: boolean;
+	/**
 	 * Optional `fetch` implementation override. Providers route every HTTP
 	 * request — direct calls, SDK clients, and retry helpers — through this
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that

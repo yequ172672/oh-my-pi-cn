@@ -397,6 +397,7 @@ export class StatusLineComponent implements Component {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -1258,8 +1259,12 @@ export class StatusLineComponent implements Component {
 		const normalized = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
+		const usageChanged = this.#cachedUsage !== normalized;
 		this.#cachedUsage = normalized;
 		this.#usageFetchedAt = Date.now();
+		// Usage fetch is async; without a repaint the top border stays blank until
+		// some unrelated event (git resolve, keystroke, …) rebuilds it.
+		if (usageChanged) this.#onBranchChange?.();
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -1368,13 +1373,25 @@ export class StatusLineComponent implements Component {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
+		let monthly: { percent: number; resetHours?: number } | undefined;
 		let fiveHourTier: string | undefined;
 		let sevenDayTier: string | undefined;
+		let monthlyTier: string | undefined;
+		let monthlyPriority = Number.POSITIVE_INFINITY;
 		const now = Date.now();
+		const cursorMonthlyPriority = (limitId: unknown): number => {
+			// When /auth/usage and /api/usage-summary are merged, prefer the personal
+			// dashboard rails over legacy per-model request fractions.
+			if (limitId === "cursor:usd:individual-auto") return 0;
+			if (limitId === "cursor:usd:individual-plan" || limitId === "cursor:usd:individual-overall") return 1;
+			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
+			return 3;
+		};
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
 			const provider = (report as { provider?: unknown }).provider;
@@ -1388,8 +1405,9 @@ export class StatusLineComponent implements Component {
 					continue;
 				}
 				const l = limit as {
+					id?: string;
 					scope?: { windowId?: string; tier?: string };
-					window?: { resetsAt?: number };
+					window?: { resetsAt?: number; durationMs?: number };
 					amount?: { usedFraction?: number };
 				};
 				const fraction = l.amount?.usedFraction;
@@ -1397,9 +1415,22 @@ export class StatusLineComponent implements Component {
 				const windowId = l.scope?.windowId;
 				const tier = l.scope?.tier;
 				const resetsAt = l.window?.resetsAt;
+				// Canonical window ids win. Fall back to the reported span (same
+				// tolerance as the 5h priority-boost check) so providers that emit
+				// non-canonical ids, and cache rows written before a provider was
+				// canonicalized, still map onto the two subscription windows.
+				const durationMs = l.window?.durationMs;
+				const windowClass =
+					windowId === "5h" || windowId === "7d"
+						? windowId
+						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
+							? "5h"
+							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
+								? "7d"
+								: undefined;
 				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
 				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
-				if (windowId === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
+				if (windowClass === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
 					fiveHour = {
 						percent: fraction * 100,
 						resetMinutes:
@@ -1407,7 +1438,7 @@ export class StatusLineComponent implements Component {
 					};
 					fiveHourTier = tier || undefined;
 				}
-				if (windowId === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
+				if (windowClass === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
 					sevenDay = {
 						percent: fraction * 100,
 						resetHours:
@@ -1415,12 +1446,33 @@ export class StatusLineComponent implements Component {
 					};
 					sevenDayTier = tier || undefined;
 				}
+				// Conservatively gate monthly status-line rendering to Cursor for now —
+				// Copilot/OpenCode also emit monthly windows, but their multi-bucket
+				// shape needs a dedicated selector before we surface `mo N%` for them.
+				if (activeProvider === "cursor" && (windowId === "monthly" || windowId === "30d")) {
+					const priority = cursorMonthlyPriority(l.id);
+					const shouldReplace =
+						!monthly ||
+						priority < monthlyPriority ||
+						(priority === monthlyPriority && monthlyTier !== undefined && !tier);
+					if (shouldReplace) {
+						monthly = {
+							percent: fraction * 100,
+							resetHours:
+								typeof resetsAt === "number"
+									? Math.max(0, Math.round((resetsAt - now) / 3_600_000))
+									: undefined,
+						};
+						monthlyTier = tier || undefined;
+						monthlyPriority = priority;
+					}
+				}
 			}
 		}
-		if (!fiveHour && !sevenDay) return null;
+		if (!fiveHour && !sevenDay && !monthly) return null;
 		// Single compact label; prefer the five-hour tier if displayed windows ever disagree.
-		const effectiveTier = fiveHourTier ?? sevenDayTier;
-		return { tier: effectiveTier, fiveHour, sevenDay };
+		const effectiveTier = fiveHourTier ?? sevenDayTier ?? monthlyTier;
+		return { tier: effectiveTier, fiveHour, sevenDay, monthly };
 	}
 
 	/**

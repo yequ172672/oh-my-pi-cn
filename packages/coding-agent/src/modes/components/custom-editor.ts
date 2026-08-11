@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	addKeyAliases,
@@ -148,6 +147,19 @@ function isPastedPathSeparator(char: string | undefined): boolean {
 	return char === undefined || char === " " || char === "\t" || char === "\r" || char === "\n";
 }
 
+function pastedFileUrlToPath(value: string): string {
+	const url = new URL(value);
+	if (url.protocol !== "file:") throw new Error("Not a file URL");
+	const pathname = decodeURIComponent(url.pathname);
+	if (url.hostname && url.hostname !== "localhost") {
+		return `\\\\${url.hostname}${pathname.replaceAll("/", "\\")}`;
+	}
+	if (/^\/[A-Za-z]:\//.test(pathname)) {
+		return pathname.slice(1).replaceAll("/", "\\");
+	}
+	return pathname;
+}
+
 function normalizePastedPath(path: string): string {
 	const trimmed = path.trim();
 	const first = trimmed[0];
@@ -162,7 +174,7 @@ function normalizePastedPath(path: string): string {
 	// than failing in `loadImageInput` with a literal-`file://` path.
 	if (FILE_URI_REGEX.test(unquoted)) {
 		try {
-			return fileURLToPath(unquoted);
+			return pastedFileUrlToPath(unquoted);
 		} catch {
 			// Malformed file URL: drop through to the shell-unescape branch
 			// so the caller can still reject it as a non-explicit path.

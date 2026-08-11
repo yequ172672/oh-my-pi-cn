@@ -13,6 +13,30 @@ describe("renderMermaidAscii", () => {
 		expect(rendered).not.toContain("──A─");
 	});
 
+	it("renders Unicode and ASCII state pseudostates with distinct UML markers", () => {
+		const source = ["stateDiagram-v2", "  [*] --> Created", "  Created --> [*]"].join("\n");
+		const unicode = renderMermaidAscii(source, { colorMode: "none" });
+		const ascii = renderMermaidAscii(source, { colorMode: "none", useAscii: true });
+
+		expect(unicode).toMatch(/│\s+●\s+│/);
+		expect(unicode).toMatch(/║\s+◎\s+║/);
+		expect(ascii).toMatch(/\|\s+\*\s+\|/);
+		expect(ascii).toMatch(/‖\s+\*\s+‖/);
+		expect(ascii).toMatch(/#=+#/);
+	});
+
+	it("keeps rounded pseudostate corners upright in bottom-to-top diagrams", () => {
+		const rendered = renderMermaidAscii(["stateDiagram-v2", "  direction BT", "  [*] --> Created"].join("\n"), {
+			colorMode: "none",
+		});
+		const rows = rendered.split("\n");
+		const markerRow = rows.findIndex(row => row.includes("●"));
+
+		expect(markerRow).toBeGreaterThan(0);
+		expect(rows[markerRow - 1]).toMatch(/╭─+╮/);
+		expect(rows[markerRow + 1]).toMatch(/╰─+╯/);
+	});
+
 	it("returns a bounded fallback for declaration orders that make a clean route unreachable", () => {
 		const rendered = renderMermaidAsciiSafe(
 			[

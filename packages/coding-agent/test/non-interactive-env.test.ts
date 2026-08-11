@@ -59,6 +59,21 @@ describe("buildNonInteractiveEnv", () => {
 
 		expect(env.GPG_TTY).toBe("/dev/pts/7");
 	});
+
+	it("injects clap-compatible CI=true by default", () => {
+		expect(buildNonInteractiveEnv(undefined, {}, "linux").CI).toBe("true");
+		expect(buildNonInteractiveEnv(undefined, {}, "win32").CI).toBe("true");
+	});
+
+	it("drops CI when PI_BASH_NO_CI or its legacy alias is set", () => {
+		expect(buildNonInteractiveEnv(undefined, { PI_BASH_NO_CI: "1" }, "linux")).not.toHaveProperty("CI");
+		expect(buildNonInteractiveEnv(undefined, { CLAUDE_BASH_NO_CI: "1" }, "linux")).not.toHaveProperty("CI");
+		expect(buildNonInteractiveEnv(undefined, { PI_BASH_NO_CI: "1" }, "win32")).not.toHaveProperty("CI");
+	});
+
+	it("lets a per-command CI override win over the opt-out", () => {
+		expect(buildNonInteractiveEnv({ CI: "0" }, { PI_BASH_NO_CI: "1" }, "linux").CI).toBe("0");
+	});
 });
 
 it("filters expanded dotenv values while preserving matching launcher values", async () => {

@@ -118,7 +118,7 @@ function cursorTurn(): AgentMessage[] {
 				type: "toolCall",
 				id: "tc-bash",
 				name: "bash",
-				arguments: { command: "ls -1", cwd: undefined, timeout: undefined },
+				arguments: { command: "ls -1" },
 			},
 		],
 		api: "cursor-agent",

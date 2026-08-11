@@ -1,4 +1,4 @@
-import type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
+import { type AppKeybinding, type KeybindingsManager, keyHintPlatform, modifierLabel } from "../../config/keybindings";
 
 export interface HotkeysMarkdownBindings {
 	keybindings: Pick<KeybindingsManager, "getDisplayString">;
@@ -9,21 +9,25 @@ function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): strin
 }
 
 export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string {
+	const platform = keyHintPlatform();
+	const isMac = platform === "darwin";
+	const alt = modifierLabel("alt", platform);
+	const cmd = modifierLabel("super", platform);
 	return [
 		"**Navigation**",
 		"| Key | Action |",
 		"|-----|--------|",
 		"| `Arrow keys` | Move cursor / browse history (Up when empty) |",
-		"| `Option+Left/Right` | Move by word |",
-		"| `Ctrl+A` / `Home` / `Cmd+Left` | Start of line |",
-		"| `Ctrl+E` / `End` / `Cmd+Right` | End of line |",
+		`| \`${alt}+Left/Right\` | Move by word |`,
+		isMac ? `| \`Ctrl+A\` / \`Home\` / \`${cmd}+Left\` | Start of line |` : "| `Ctrl+A` / `Home` | Start of line |",
+		isMac ? `| \`Ctrl+E\` / \`End\` / \`${cmd}+Right\` | End of line |` : "| `Ctrl+E` / `End` | End of line |",
 		"",
 		"**Editing**",
 		"| Key | Action |",
 		"|-----|--------|",
 		"| `Enter` | Send message |",
-		"| `Shift+Enter` / `Alt+Enter` | New line |",
-		"| `Ctrl+W` / `Option+Backspace` | Delete word backwards |",
+		`| \`Shift+Enter\` / \`${alt}+Enter\` | New line |`,
+		`| \`Ctrl+W\` / \`${alt}+Backspace\` | Delete word backwards |`,
 		"| `Ctrl+U` | Delete to start of line |",
 		"| `Ctrl+K` | Delete to end of line |",
 		`| \`${appKey(bindings, "app.clipboard.copyLine")}\` | Copy current line |`,

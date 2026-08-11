@@ -1031,7 +1031,13 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					},
 				});
 
-				if (output.stopReason !== "stop" || hasMeaningfulGoogleContent(output)) break;
+				if (
+					output.stopReason !== "stop" ||
+					hasMeaningfulGoogleContent(output) ||
+					options?.acceptEmptyResponse === true
+				) {
+					break;
+				}
 				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
 					throw new AIError.ProviderResponseError(
 						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,

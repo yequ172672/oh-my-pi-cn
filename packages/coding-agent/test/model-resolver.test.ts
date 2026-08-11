@@ -10,7 +10,7 @@ import {
 	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAgentModelPatterns,
-	resolveAgentModelSource,
+	resolveAgentModelSelection,
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
@@ -846,7 +846,7 @@ describe("resolveAgentPrewalkPattern", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
-	test("selects the first non-empty source and skips aliases with no patterns", () => {
+	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
 				empty: "",
@@ -855,32 +855,34 @@ describe("resolveAgentModelPatterns", () => {
 			},
 		});
 
-		const emptyRequest = {
-			requestModel: "",
-			settingsOverride: "@override",
-			agentModel: ["@definition"],
-			settings,
-		};
-		expect(resolveAgentModelPatterns(emptyRequest)).toEqual(["openai/gpt-4o"]);
-		expect(resolveAgentModelSource(emptyRequest)).toBe("@override");
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "",
+				settingsOverride: "@override",
+				agentModel: ["@definition"],
+				settings,
+			}),
+		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
 
-		const emptyAlias = {
-			requestModel: "@empty",
-			settingsOverride: ",,",
-			agentModel: ["@definition"],
-			settings,
-		};
-		expect(resolveAgentModelPatterns(emptyAlias)).toEqual(["anthropic/claude-sonnet-4-5"]);
-		expect(resolveAgentModelSource(emptyAlias)).toEqual(["@definition"]);
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "@empty",
+				settingsOverride: ",,",
+				agentModel: ["@definition"],
+				settings,
+			}),
+		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
 
-		const concreteRequest = {
-			requestModel: "openai/gpt-4o",
-			settingsOverride: "@override",
-			agentModel: ["@definition"],
-			settings,
-		};
-		expect(resolveAgentModelSource(concreteRequest)).toBe("openai/gpt-4o");
-		expect(resolveExplicitModelRole(resolveAgentModelSource(concreteRequest), settings)).toBeUndefined();
+		// An explicit selector carries no role identity, so the child must not
+		// capture the routing of a role that happens to name the same model.
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "openai/gpt-4o",
+				settingsOverride: "@override",
+				agentModel: ["@definition"],
+				settings,
+			}),
+		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
 	});
 
 	test("falls back to the active session model when @task is unset", () => {

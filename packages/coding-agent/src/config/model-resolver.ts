@@ -1138,14 +1138,30 @@ function resolveEffectiveAgentModelSelection(
 	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
-/** Return the raw selector source that supplies the effective agent patterns. */
-export function resolveAgentModelSource(options: AgentModelPatternResolutionOptions): string | string[] | undefined {
-	return resolveEffectiveAgentModelSelection(options).source;
+/** Effective agent model patterns paired with the pre-expansion role alias behind them. */
+export interface AgentModelSelection {
+	/** Expanded model patterns to spawn with. */
+	patterns: string[];
+	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
+	role: string | undefined;
 }
 
+/**
+ * Resolve an agent's model patterns together with the role identity they were
+ * expanded from. Spawn paths MUST take both from this single call: the child's
+ * inherited retry-fallback chain is keyed off the role, which the expansion
+ * discards, and deriving the two halves separately is how they drift apart.
+ */
+export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
+	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
+	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+}
+
+/** Effective agent model patterns alone, for callers with no interest in role identity. */
 export function resolveAgentModelPatterns(options: AgentModelPatternResolutionOptions): string[] {
 	return resolveEffectiveAgentModelSelection(options).patterns;
 }
+
 /** Default prewalk hand-off target when no explicit target is configured. */
 export const DEFAULT_PREWALK_TARGET = "@smol";
 

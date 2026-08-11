@@ -196,7 +196,7 @@ describe("OmfgController", () => {
 		expect(harness.ttsrAddRule.mock.calls[0]?.[0].path).toBe(savedPath);
 		const rendered = Bun.stripANSI(harness.container.render(120).join("\n"));
 		expect(rendered).toContain("Registered live");
-		expect(rendered).toContain(path.join(".omp", "rules", "ts-no-any.md"));
+		expect(rendered).toContain(".omp/rules/ts-no-any.md");
 		expect(rendered).toContain("Esc dismiss");
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);

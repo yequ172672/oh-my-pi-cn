@@ -1635,6 +1635,14 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	repairOrphanOutputs?: boolean;
 	/** Preserve assistant message item IDs from text signatures during fallback replay. */
 	preserveAssistantMessageIds?: boolean;
+	/**
+	 * Synthesize a reasoning item for every replayed assistant turn that carries
+	 * content but no reasoning item. Set for DeepSeek-family Responses targets
+	 * that reject a thinking-mode continuation lacking `reasoning_text`.
+	 */
+	requiresReasoningReplayForAllTurns?: boolean;
+	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
+	requiresReasoningReplayForToolCalls?: boolean;
 }
 
 /**
@@ -1861,6 +1869,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,
+				options.requiresReasoningReplayForAllTurns ?? false,
+				options.requiresReasoningReplayForToolCalls ?? false,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -1914,6 +1924,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	customToolWireNameMap?: ReadonlyMap<string, string>,
 	computerCallIds?: Set<string>,
+	requiresReasoningReplayForAllTurns = false,
+	requiresReasoningReplayForToolCalls = false,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -1925,14 +1937,36 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		);
 	const isDifferentModel =
 		assistantMsg.model !== model.id && assistantMsg.provider === model.provider && assistantMsg.api === model.api;
+	// DeepSeek-family Responses targets (e.g. opencode-go) reject a thinking-mode
+	// continuation whose replayed assistant turns carry no reasoning item: "The
+	// reasoning_text in the thinking mode must be passed back to the API." After a
+	// cross-model prewalk hand-off or a compaction that drops the native replay
+	// payload, the block re-encode below demotes reasoning to text and emits no
+	// reasoning item. Track reasoning emission so a placeholder can be synthesized,
+	// mirroring the chat-completions `requiresReasoningContentForAllAssistantTurns`
+	// empty-`reasoning_content` safety net.
+	const requiresReasoningItem =
+		assistantMsg.stopReason !== "error" &&
+		(requiresReasoningReplayForAllTurns ||
+			(requiresReasoningReplayForToolCalls && assistantMsg.content.some(block => block.type === "toolCall")));
+	let reasoningItemEmitted = false;
+	const carriedReasoningTexts: string[] = [];
+	let synthesizedReasoningItemId: string | undefined;
 
 	for (const block of assistantMsg.content) {
 		if (block.type === "thinking" && assistantMsg.stopReason !== "error") {
+			if (requiresReasoningItem) {
+				if (block.itemId) synthesizedReasoningItemId ??= block.itemId;
+				if (block.thinking.trim().length > 0) carriedReasoningTexts.push(block.thinking);
+			}
 			if (!includeThinkingSignatures) {
 				continue;
 			}
 			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
-			if (reasoningItem) outputItems.push(reasoningItem);
+			if (reasoningItem) {
+				outputItems.push(reasoningItem);
+				reasoningItemEmitted = true;
+			}
 			continue;
 		}
 
@@ -2031,6 +2065,26 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			name: functionName,
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
+	}
+
+	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
+		// Replay the demoted reasoning (already present in `content` as visible
+		// text) as a structured reasoning item so the thinking-mode continuation
+		// carries the `reasoning_text` the provider requires. The text may be empty
+		// when the source turn was minted by another model and its reasoning is
+		// already folded into the message text; the item's presence is what
+		// satisfies the provider contract, mirroring the empty `reasoning_content`
+		// placeholder used on the chat-completions path.
+		const reasoningText = carriedReasoningTexts.join("\n");
+		const reasoningId =
+			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
+		const reasoningItem: ResponseReasoningItem = {
+			type: "reasoning",
+			id: reasoningId,
+			summary: [],
+			content: [{ type: "reasoning_text", text: reasoningText }],
+		};
+		outputItems.unshift(reasoningItem);
 	}
 
 	return outputItems;

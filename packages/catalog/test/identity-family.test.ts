@@ -227,6 +227,17 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("glm-4.5v")).toBe(false);
 		expect(isReasoningGlmModelId("qwen3.5")).toBe(false);
 	});
+
+	test("matches uppercase provider-prefixed GLM ids", () => {
+		// Baseten, CoreWeave, HuggingFace, etc. serve GLM under uppercase ids.
+		expect(isReasoningGlmModelId("zai-org/GLM-5.2")).toBe(true);
+		expect(isReasoningGlmModelId("zai-org/GLM-5.2-Fast")).toBe(true);
+		expect(isReasoningGlmModelId("zai-org/GLM-4.7")).toBe(true);
+		expect(isReasoningGlmModelId("zai-org/GLM-4.5-Air")).toBe(true);
+		expect(isReasoningGlmModelId("zai-org/GLM-5-Turbo")).toBe(true);
+		// Vision SKUs are still excluded even in uppercase.
+		expect(isReasoningGlmModelId("zai-org/GLM-4.5V")).toBe(false);
+	});
 });
 
 describe("isGlmVisionModelId", () => {

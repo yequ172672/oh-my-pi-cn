@@ -16,6 +16,7 @@ import {
 	sortAndValidateTextEdits,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import { renderCall, renderResult } from "@oh-my-pi/pi-coding-agent/lsp/render";
+import { configCache, getConfig } from "@oh-my-pi/pi-coding-agent/lsp/servers";
 import {
 	type CodeAction,
 	type CreateFile,
@@ -353,7 +354,7 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("sends the LSP exit notification after shutdown completes", async () => {
+	it("sends the LSP exit notification and releases the idle checker after shutdown", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-shutdown-");
 		try {
 			const server = installFakeLsp((message, srv) => {
@@ -385,9 +386,45 @@ describe("lsp regressions", () => {
 			expect(shutdownIndex).toBeGreaterThanOrEqual(0);
 			expect(exitIndex).toBeGreaterThan(shutdownIndex);
 			expect(server.killed).toBe(false);
+
+			const clientModule = new URL("../../src/lsp/client.ts", import.meta.url).href;
+			const shutdownProbe = Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					`import { setIdleTimeout, shutdownAll } from ${JSON.stringify(clientModule)}; setIdleTimeout(60_000); await shutdownAll();`,
+				],
+				{ stdout: "ignore", stderr: "inherit" },
+			);
+			// Real time is required because fake timers cannot advance a separate Bun process.
+			// The process exit itself proves shutdown released the event loop.
+			const probeExit = await Promise.race([shutdownProbe.exited, Bun.sleep(5_000).then(() => null)]);
+			if (probeExit === null) {
+				shutdownProbe.kill();
+				await shutdownProbe.exited;
+			}
+			expect(probeExit).toBe(0);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
+		}
+	});
+
+	it("rearms the idle checker from cached config after global shutdown", async () => {
+		const cwd = "/cached-lsp-config";
+		const intervalSpy = vi.spyOn(globalThis, "setInterval");
+		configCache.set(cwd, { servers: {}, idleTimeoutMs: 60_000 });
+		try {
+			lspClient.setIdleTimeout(60_000);
+			expect(intervalSpy).toHaveBeenCalledTimes(1);
+
+			await lspClient.shutdownAll();
+			getConfig(cwd);
+
+			expect(intervalSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			lspClient.setIdleTimeout(null);
+			configCache.delete(cwd);
 		}
 	});
 
@@ -945,7 +982,7 @@ describe("lsp regressions", () => {
 
 			const events: string[] = [];
 			let statusRequests = 0;
-			installFakeLsp((message, srv) => {
+			const fakeServer = installFakeLsp((message, srv) => {
 				if (message.method === "initialize") {
 					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { definitionProvider: true } } });
 					srv.send({
@@ -1025,6 +1062,12 @@ describe("lsp regressions", () => {
 			expect(output).toContain("Found 1 definition(s)");
 			expect(events[0]).toBe("open");
 			expect(events.filter(line => line === "status").length).toBeGreaterThanOrEqual(3);
+			const firstStatusRequest = fakeServer.received.find(
+				message => message.method === "rust-analyzer/analyzerStatus",
+			);
+			if (!firstStatusRequest) throw new Error("Expected the timed-out analyzer status request");
+			const cancellation = await fakeServer.waitFor(message => message.method === "$/cancelRequest");
+			expect(cancellation.params).toEqual({ id: firstStatusRequest.id });
 		} finally {
 			vi.restoreAllMocks();
 			await lspClient.shutdownAll();

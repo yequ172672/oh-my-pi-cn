@@ -14,11 +14,39 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { SlashCommandSpec } from "./types";
+import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
 	ctx.ui.requestRender();
+}
+
+async function runWithDetachedModeDraft(
+	command: ParsedSlashCommand,
+	runtime: TuiSlashCommandRuntime,
+	run: () => Promise<boolean>,
+): Promise<void> {
+	const { editor } = runtime.ctx;
+	if (!runtime.draftDetached) editor.clearDraft();
+	try {
+		const submitted = await run();
+		if (!submitted && ((runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0)) {
+			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
+			editor.pendingImageLinks = [
+				...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
+				...editor.pendingImageLinks,
+			];
+			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
+		}
+	} catch (error) {
+		if (!editor.getText() && editor.pendingImages.length === 0) {
+			editor.setText(command.text);
+			editor.pendingImages = runtime.input?.images ? [...runtime.input.images] : [];
+			editor.pendingImageLinks = runtime.input?.imageLinks ? [...runtime.input.imageLinks] : [];
+			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
+		}
+		runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+	}
 }
 
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
@@ -182,8 +210,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Plan: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
-			runtime.ctx.editor.setText("");
+			await runWithDetachedModeDraft(command, runtime, () =>
+				runtime.ctx.handlePlanModeCommand(command.args || undefined, runtime.input),
+			);
 		},
 	},
 	{
@@ -208,8 +237,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Vibe: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleVibeModeCommand(command.args || undefined);
-			runtime.ctx.editor.setText("");
+			await runWithDetachedModeDraft(command, runtime, () =>
+				runtime.ctx.handleVibeModeCommand(command.args || undefined, runtime.input),
+			);
 		},
 	},
 	{
@@ -232,8 +262,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleGoalModeCommand(command.args || undefined);
-			runtime.ctx.editor.setText("");
+			await runWithDetachedModeDraft(command, runtime, () =>
+				runtime.ctx.handleGoalModeCommand(command.args || undefined, runtime.input),
+			);
 		},
 	},
 	{
@@ -242,11 +273,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			// Clear the slash draft BEFORE the await: the handler blocks for the
-			// whole kickoff turn, and a post-await clear would wipe an answer the
-			// user starts typing while the first interview question streams.
-			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleGuidedGoalCommand(command.args || undefined);
+			await runWithDetachedModeDraft(command, runtime, () =>
+				runtime.ctx.handleGuidedGoalCommand(command.args || undefined, runtime.input),
+			);
 		},
 	},
 	{

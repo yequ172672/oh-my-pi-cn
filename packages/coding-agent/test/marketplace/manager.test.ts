@@ -716,6 +716,34 @@ describe("MarketplaceManager", () => {
 		);
 	});
 
+	it("uninstallPlugin dryRun preserves ambiguity checks and both scoped entries", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+
+		await expect(
+			ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", undefined, { dryRun: true }),
+		).rejects.toThrow(/both user and project scope/);
+		await ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", "user", { dryRun: true });
+
+		const userReg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "installed_plugins.json"));
+		const projectReg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "project_installed_plugins.json"));
+		expect(userReg.plugins["hello-plugin@test-marketplace"]).toBeDefined();
+		expect(projectReg.plugins["hello-plugin@test-marketplace"]).toBeDefined();
+	});
+
+	it("uninstallPlugin dryRun rejects a scope where the plugin is not installed", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+
+		await expect(
+			ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", "user", { dryRun: true }),
+		).rejects.toThrow(/not installed in user scope/);
+
+		const projectReg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "project_installed_plugins.json"));
+		expect(projectReg.plugins["hello-plugin@test-marketplace"]).toBeDefined();
+	});
+
 	it("uninstallPlugin scope:user removes only user entry, keeps project entry", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
