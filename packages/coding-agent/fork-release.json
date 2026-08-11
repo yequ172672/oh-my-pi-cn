@@ -1,7 +1,7 @@
 {
 	"schemaVersion": 1,
-	"forkVersion": "17.2.12",
-	"upstreamVersion": "17.2.12",
-	"nativeVersion": "17.2.12",
-	"upstreamCommit": "45e12e5bb758198a920c6070e7e64cb33b21beac"
+	"forkVersion": "17.2.13",
+	"upstreamVersion": "17.2.13",
+	"nativeVersion": "17.2.13",
+	"upstreamCommit": "d3b22a0db6a4a0e2ef272a880e38286e0c466dc9"
 }
