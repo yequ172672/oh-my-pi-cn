@@ -243,7 +243,7 @@ bun run publish:fork:dry -- --output .artifacts/fork
 1. **PREPARED**：工作区检查、版本审批、变更日志、候选 tgz 和隔离安装全部通过。
 2. **GIT_PUBLISHED**：使用下面的 fork 发行命令创建发行提交与 `omp-cn-v<forkVersion>`，并将 `main` 与新标签一次 `git push --atomic` 到 `origin`。标签必须指向已审核的精确提交。
 3. **CI_VERIFIED**：GitHub 托管 runner 对该精确提交成功；不存在 runner 或只验证了其他 SHA 时不能继续。
-4. **ASSETS_READY**：CI 从精确 SHA 生成并验证唯一发行 tgz；各目标平台二进制经过启动 smoke，校验和已生成，所有文件先上传到 draft GitHub Release。重跑时必须清除 draft 的陈旧资产，并把重新下载的精确资产集合逐字节对回本轮可信构建。
+4. **ASSETS_READY**：CI 从精确 SHA 生成并验证唯一发行 tgz；当前承诺的 Windows x64 二进制经过 Windows runner 启动 smoke，校验和已生成，所有文件先上传到 draft GitHub Release。重跑时必须清除 draft 的陈旧资产，并把重新下载的精确资产集合逐字节对回本轮可信构建。
 5. **NPM_PUBLISHED**：发布 CI 验证并传递的同一个 tgz，核对 `npm view omp-cn@<version>` 的版本、dist-tag、校验值和元数据。
 6. **RELEASE_COMPLETE**：GitHub Release 使用 fork 变更日志，安装器路径完成回归，最后显式取消 draft/prerelease 并标记 latest。
 
@@ -260,7 +260,7 @@ bun run release:fork <forkVersion> `
 
 GitHub 仓库必须在发布前配置 `NPM_TOKEN`，或在 npm 为本 workflow 配置信任发布者。两者都没有时 npm job 会停止，GitHub Release 必须保持 draft。当前凭据状态需要每次发行重新核验，不能从以往成功记录推断。
 
-源码-only Release 不能成为安装器使用的 stable/latest。稳定 Release 必须包含所有承诺平台的已验证二进制和校验和；缺少资产时应保持 draft/prerelease 并停止发布状态机。
+源码-only Release 不能成为安装器使用的 stable/latest。当前稳定 Release 只承诺 Windows x64 二进制；macOS、Linux 和其他架构通过 Bun/npm 安装。稳定 Release 必须包含经过原生 Windows runner 验证的 Windows x64 二进制、tgz 和校验和；缺少任一资产时应保持 draft/prerelease 并停止发布状态机。
 
 ## 10. 安装器合同
 

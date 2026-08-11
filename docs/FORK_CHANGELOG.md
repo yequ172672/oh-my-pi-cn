@@ -16,6 +16,10 @@
 - GitHub 仓库启用 Issues 与 Discussions，并补充统一的项目简介和技术主题标签。
 - 更新 GitHub Actions 缓存步骤到 Node.js 24 兼容版本，消除即将失效的 Node.js 20 运行时警告。
 
+### 发行
+
+- 稳定版 Release 暂时只构建并发布经过原生 Windows runner 验证的 Windows x64 二进制；macOS 和 Linux 用户继续通过 Bun/npm 安装 `omp-cn`。
+
 ## [17.2.12] - 2026-08-09
 
 ### 新增

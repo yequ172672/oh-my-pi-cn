@@ -73,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/main/scripts
 
 **GitHub 发布版本二进制文件**
 
-如果有可用版本，可以从[本分支的 Release 页面](https://github.com/yequ172672/oh-my-pi-cn/releases)下载对应平台的二进制文件。
+当前 Release 只提供经过原生 Windows runner 验证的 Windows x64 二进制。macOS 和 Linux 用户请使用上面的 Bun/npm 安装方式；也可以从[本分支的 Release 页面](https://github.com/yequ172672/oh-my-pi-cn/releases)下载 Windows 版本。
 
 **Bun（推荐）**
 
