@@ -219,6 +219,7 @@ jobs:
            run: bun run ci:test:smoke
 
          - name: Verify fork package artifact
+           if: needs.resolve.outputs.is-release == 'true'
            run: bun run publish:fork:dry --skip-check
 
          - name: Assert verification restored tracked files

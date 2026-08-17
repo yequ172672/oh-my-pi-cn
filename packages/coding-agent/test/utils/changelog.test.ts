@@ -14,7 +14,8 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { VERSION as APP_VERSION } from "@oh-my-pi/pi-coding-agent/distribution";
+import { removeWithRetries, VERSION as UPSTREAM_VERSION } from "@oh-my-pi/pi-utils";
 import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
 import {
 	type ChangelogEntry,
@@ -234,8 +235,8 @@ describe("parseChangelog", () => {
 		const latest = entries[0];
 		const previous = entries[1];
 
-		expect(`${latest?.major}.${latest?.minor}.${latest?.patch}`).toBe(VERSION);
-		expect(latest?.content).toContain(`## [${VERSION}]`);
+		expect(`${latest?.major}.${latest?.minor}.${latest?.patch}`).toBe(UPSTREAM_VERSION);
+		expect(latest?.content).toContain(`## [${UPSTREAM_VERSION}]`);
 		expect(previous).toBeDefined();
 
 		const previousVersion = `${previous?.major}.${previous?.minor}.${previous?.patch}`;
@@ -343,7 +344,7 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 				expect(output).not.toContain("## [");
 				expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
 				expect(stderr).not.toContain("Cannot find module");
-				expect(await readLastChangelogVersion(agentDir)).toBe(VERSION);
+				expect(await readLastChangelogVersion(agentDir)).toBe(APP_VERSION);
 			} finally {
 				await removeWithRetries(root);
 			}
