@@ -353,11 +353,7 @@ function Install-Binary {
         if ($reportedVersion -ne "omp/$ExpectedVersion") {
             throw "Downloaded $BinaryName reports '$reportedVersion', expected 'omp/$ExpectedVersion'"
         }
-        if (Test-Path -LiteralPath $OutPath) {
-            [System.IO.File]::Replace($TempPath, $OutPath, $null)
-        } else {
-            Move-Item -LiteralPath $TempPath -Destination $OutPath
-        }
+        [System.IO.File]::Move($TempPath, $OutPath, $true)
     } finally {
         Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $ChecksumPath -Force -ErrorAction SilentlyContinue

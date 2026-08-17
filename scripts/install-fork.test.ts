@@ -354,4 +354,62 @@ try {
 		expect(`${stdout}\n${stderr}`).toContain("expected 'omp/1.0.0'");
 		expect(await Bun.file(path.join(installDir, "omp.exe")).text()).toBe("known-good");
 	});
+
+	(pwsh ? test : test.skip)("PowerShell atomically replaces an existing verified binary", async () => {
+		if (!pwsh) return;
+		const root = await makeTempDir("omp-install-powershell-replace-");
+		const installDir = path.join(root, "install");
+		const wrapper = path.join(root, "invoke.ps1");
+		const fixture = path.join(root, "fixture.exe");
+		const fixtureSource = path.join(root, "fixture.ts");
+		await fs.mkdir(installDir, { recursive: true });
+		await Bun.write(path.join(installDir, "omp.exe"), "known-good");
+		await Bun.write(fixtureSource, 'process.stdout.write("omp/1.0.0\\n");\n');
+		const compile = Bun.spawn([process.execPath, "build", "--compile", fixtureSource, "--outfile", fixture], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [compileExitCode, compileStdout, compileStderr] = await Promise.all([
+			compile.exited,
+			new Response(compile.stdout).text(),
+			new Response(compile.stderr).text(),
+		]);
+		expect(compileExitCode, `${compileStdout}\n${compileStderr}`).toBe(0);
+		const installer = path.join(repoRoot, "scripts", "install.ps1").replaceAll("'", "''");
+		await Bun.write(
+			wrapper,
+			`$env:PI_INSTALL_DIR = '${installDir.replaceAll("'", "''")}'
+$fixture = '${fixture.replaceAll("'", "''")}'
+function Invoke-RestMethod {
+    [pscustomobject]@{
+        tag_name = 'omp-cn-v1.0.0'
+        assets = @(
+            [pscustomobject]@{ name = 'omp-windows-x64.exe'; browser_download_url = 'https://example.invalid/omp.exe' },
+            [pscustomobject]@{ name = 'SHA256SUMS.txt'; browser_download_url = 'https://example.invalid/SHA256SUMS.txt' }
+        )
+    }
+}
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, [int]$TimeoutSec)
+    if ($Uri -like '*SHA256SUMS.txt') {
+        $digest = (Get-FileHash -LiteralPath $script:DownloadedFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($OutFile, "$digest  omp-windows-x64.exe\`n")
+    } else {
+        Copy-Item -LiteralPath $fixture -Destination $OutFile
+        $script:DownloadedFixture = $OutFile
+    }
+}
+& ([scriptblock]::Create((Get-Content -LiteralPath '${installer}' -Raw))) -Binary
+`,
+		);
+
+		const proc = Bun.spawn([pwsh, "-NoProfile", "-File", wrapper], { cwd: repoRoot, stdout: "pipe", stderr: "pipe" });
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+		expect(await Bun.file(path.join(installDir, "omp.exe")).bytes()).toEqual(await Bun.file(fixture).bytes());
+	});
 });
