@@ -4,6 +4,7 @@ import {
 	getActiveClients,
 	getActiveOrPendingClient,
 	getOrCreateClient,
+	isRustAnalyzerClient,
 	type LspServerStatus,
 	notifySaved,
 	sendNotification,
@@ -256,17 +257,22 @@ export function isMethodNotFoundError(err: unknown): boolean {
 
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
-	// rust-analyzer exposes a real reload request. Every other server rejects it
-	// with method-not-found — that alone justifies the generic fallback. A caller
-	// cancel or tool timeout must propagate, never be mistaken for an unsupported
-	// method and swallowed into a bogus "Restarted" (issue #6369).
-	try {
-		await sendRequest(client, "rust-analyzer/reloadWorkspace", null, signal);
-		return `Reloaded ${serverName}`;
-	} catch (err) {
-		throwIfAborted(signal);
-		if (!isMethodNotFoundError(err)) throw err;
-		// Method not supported — fall through to the generic reload.
+	// rust-analyzer exposes a real reload request. Only rust-analyzer implements
+	// it, so gate the request on the binary (or registered name) rather than
+	// probing every server: some servers (Roslyn) crash the whole process on an
+	// unknown method instead of replying with method-not-found — killing the
+	// server `lsp reload` was meant to refresh (issue #8571, dotnet/roslyn#84890).
+	// A caller cancel or tool timeout must propagate, never be mistaken for an
+	// unsupported method and swallowed into a bogus "Restarted" (issue #6369).
+	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
+		try {
+			await sendRequest(client, "rust-analyzer/reloadWorkspace", undefined, signal);
+			return `Reloaded ${serverName}`;
+		} catch (err) {
+			throwIfAborted(signal);
+			if (!isMethodNotFoundError(err)) throw err;
+			// Method not supported — fall through to the generic reload.
+		}
 	}
 	// workspace/didChangeConfiguration is a notification per spec; sending it
 	// as a request hangs until the tool deadline on servers that route it to

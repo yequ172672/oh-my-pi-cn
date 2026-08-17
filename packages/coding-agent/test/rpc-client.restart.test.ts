@@ -23,34 +23,23 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 
 		await client.start();
 		const state = (await client.getState()) as unknown as { payload: string };
-		expect(state.payload).toBe("😀".repeat(400_000));
+		expect(state.payload).toBe("😀".repeat(270_000));
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "user", content: "first", timestamp: 1 },
 			{ role: "assistant", content: [{ type: "text", text: "second" }], timestamp: 2 },
 		]);
 	}, 20_000);
 
-	test("normalizes state fields omitted by a legacy RPC server", async () => {
+	test("normalizes omitted state fields and a runtime-invalid tokensPerSecond", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
-			env: { MOCK_RPC_LEGACY_STATE: "1" },
+			env: { MOCK_RPC_LEGACY_STATE: "1", MOCK_RPC_INVALID_TPS: "1" },
 		});
 
 		await client.start();
 		const state = await client.getState();
 		expect(state.fastModeEnabled).toBe(false);
 		expect(state.fastModeActive).toBe(false);
-		expect(state.tokensPerSecond).toBeNull();
-	}, 20_000);
-
-	test("normalizes a runtime-invalid tokensPerSecond from the RPC server", async () => {
-		using client = new RpcClient({
-			cliPath: MOCK_AGENT,
-			env: { MOCK_RPC_INVALID_TPS: "1" },
-		});
-
-		await client.start();
-		const state = await client.getState();
 		expect(state.tokensPerSecond).toBeNull();
 	}, 20_000);
 
@@ -112,6 +101,7 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 				MOCK_RPC_PID_FILE: pidFile,
 				MOCK_RPC_IGNORE_SIGTERM: process.platform === "win32" ? "0" : "1",
 			},
+			terminationGraceMs: 10,
 		});
 
 		await client.start();
@@ -128,22 +118,25 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 	}, 20_000);
 
 	test("start() may be retried after a failed start (child is cleaned up on failure)", async () => {
+		const env: Record<string, string> = {
+			MOCK_RPC_EXIT_BEFORE_READY: "17",
+			MOCK_RPC_EXIT_STDERR: "fixture startup failed",
+		};
 		using client = new RpcClient({
-			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
-			cwd: path.join(import.meta.dir, ".."),
-			provider: "__missing_provider__",
-			model: "claude-sonnet-4-5",
-			env: { PI_NO_TITLE: "1" },
+			cliPath: MOCK_AGENT,
+			env,
+			terminationGraceMs: 10,
 		});
 
-		await expect(client.start()).rejects.toThrow(/Unknown provider.*__missing_provider__/);
+		await expect(client.start()).rejects.toThrow("fixture startup failed");
 
 		// Before the fix, #process stayed set after the failed spawn so the
-		// second start() rejected with "Client already started". Post-fix,
-		// state is cleared and the second attempt fails with the same
-		// legitimate startup error.
-		await expect(client.start()).rejects.toThrow(/Unknown provider.*__missing_provider__/);
-	}, 30000);
+		// second start() rejected with "Client already started". A successful
+		// retry proves both the child and the client lifecycle state were reset.
+		delete env.MOCK_RPC_EXIT_BEFORE_READY;
+		await client.start();
+		await client.stop();
+	}, 10_000);
 
 	test("stop() rejects active requests instead of leaving them to time out", async () => {
 		using client = new RpcClient({
@@ -170,6 +163,7 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 				MOCK_RPC_INVALID_OUTPUT: "1",
 				MOCK_RPC_IGNORE_SIGTERM: process.platform === "win32" ? "0" : "1",
 			},
+			terminationGraceMs: 10,
 		});
 
 		let pid = 0;

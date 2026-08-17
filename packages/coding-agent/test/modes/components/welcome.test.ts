@@ -3,7 +3,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { pickWeightedTip, WelcomeComponent } from "@oh-my-pi/pi-coding-agent/modes/components/welcome";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-describe("WelcomeComponent tips", () => {
+describe("WelcomeComponent", () => {
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
 		await initTheme(false);
@@ -60,5 +60,13 @@ describe("WelcomeComponent tips", () => {
 		expect(newMax).toBeGreaterThan(0);
 		expect(newMax).toBeGreaterThan(ordinaryMax);
 		expect(pickWeightedTip([], 0.5)).toBe("");
+	});
+
+	it("keeps the right column visible when a long model name fits", () => {
+		const modelName = "DeepSeek V4 Flash (2x usage)";
+		const output = new WelcomeComponent("17.3.4", modelName, "opencode-go").render(55).join("\n");
+
+		expect(output).toContain(modelName);
+		expect(output).toContain("Recent sessions");
 	});
 });

@@ -109,4 +109,29 @@ describe("hub unified wait", () => {
 		expect(text).toContain("No running background jobs to wait for.");
 		expect(result.useless).toBe(true);
 	});
+
+	test("bare wait ignores a detached ref whose running status is stale", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		registry.register({
+			id: "Zombie",
+			displayName: "stale task",
+			kind: "sub",
+			parentId: SELF_ID,
+			session: null,
+			status: "running",
+		});
+
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		// `timeoutMs: 0` would block forever if the stale ref still opened the
+		// message-wait gate; the test times out instead of asserting.
+		const result = await new HubTool(makeSession(manager)).execute("call_4", { op: "wait", timeoutMs: 0 });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("No running background jobs to wait for.");
+		// The stale ref is reported (not silently dropped): it is the only handle
+		// the caller has for clearing it with `hub cancel`.
+		expect(text).toContain("Zombie");
+		expect(text).toContain("no turn in flight");
+	});
 });

@@ -32,7 +32,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { collapseBuiltModelVariants } from "@oh-my-pi/pi-catalog/variant-collapse";
-import { isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
@@ -61,9 +61,11 @@ import {
 	type DiscoveryProviderConfig,
 	discoverLlamaCppModelRuntimeMetadata,
 	discoverModelsByProviderType,
+	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
 	normalizeLiteLLMDiscoveryBaseUrl,
+	normalizeLlamaCppBaseUrl,
 } from "./model-discovery";
 import {
 	AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS,
@@ -195,10 +197,10 @@ export class ModelRegistry {
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 
-	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
+	#resolveCommandBackedApiKey(provider: string, options?: { forceCommandRefresh?: boolean }): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		if (!isCommandConfigValue(keyConfig)) return { configured: false };
-		const value = resolveConfigValue(keyConfig);
+		const value = resolveConfigValue(keyConfig, options);
 		if (value) {
 			this.authStorage.setConfigApiKey(provider, value);
 			return { configured: true, value };
@@ -246,7 +248,7 @@ export class ModelRegistry {
 			(isBunTestRuntime()
 				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
 				: wrapFetchForExtraCa(fetch));
-		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
+		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
@@ -577,7 +579,7 @@ export class ModelRegistry {
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
 		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		return this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		return this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withModelOverrides));
 	}
 
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
@@ -1064,9 +1066,7 @@ export class ModelRegistry {
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#unprojectedModels = this.#applyLlamaCppQwenThinkingToModels(
-			this.#applyRuntimeProviderOverrides(withModelOverrides),
-		);
+		this.#unprojectedModels = this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withModelOverrides));
 		this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
 	}
 
@@ -1446,20 +1446,28 @@ export class ModelRegistry {
 		});
 	}
 
-	// #applyLlamaCppQwenThinkingToModels re-runs applyLlamaCppQwenThinking as the
-	// outermost transform for llama.cpp-provider models, after discovery merges,
-	// cache fallbacks, and provider/transport overrides have run. It is
-	// idempotent, so it restores the routed Qwen model's chat-completions api,
-	// `/v1` runtime base URL, and disable dialect even when a configured `baseUrl`
-	// override (which wins in mergeDiscoveredModel) or a fallback to a pre-fix
-	// cached row would otherwise leave the old spec in place.
-	#applyLlamaCppQwenThinkingToModels(models: Model<Api>[]): Model<Api>[] {
+	// #applyLlamaCppModelFixups is the outermost transform for llama.cpp-provider
+	// models, after discovery merges, cache fallbacks, and provider/transport
+	// overrides have run. It applies Qwen-specific fixes (api, reasoning, compat)
+	// and ensures all non-transport models have the `/v1` prefix in their baseUrl,
+	// even when a configured override or stale cache row would strip it.
+	#applyLlamaCppModelFixups(models: Model<Api>[]): Model<Api>[] {
 		const llamaCppProviders = new Set<string>();
 		for (const provider of this.#discoverableProviders) {
 			if (provider.discovery.type === "llama.cpp") llamaCppProviders.add(provider.provider);
 		}
 		if (llamaCppProviders.size === 0) return models;
-		return models.map(model => (llamaCppProviders.has(model.provider) ? applyLlamaCppQwenThinking(model) : model));
+		return models.map(model => {
+			if (!llamaCppProviders.has(model.provider)) return model;
+			const withFixups = applyLlamaCppQwenThinking(model);
+			if (!withFixups.transport && !withFixups.baseUrl.endsWith("/v1")) {
+				return buildModel({
+					...withFixups,
+					baseUrl: ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(withFixups.baseUrl)),
+				});
+			}
+			return withFixups;
+		});
 	}
 
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
@@ -1667,17 +1675,22 @@ export class ModelRegistry {
 	 *
 	 * Side-effect-free and synchronous: a command-backed key (`!cmd`) counts as
 	 * configured by its presence alone — the program is NOT executed — and OAuth
-	 * tokens are NOT refreshed (`authStorage.hasAuth`). This is what keeps the
+	 * tokens are NOT refreshed (`authStorage.hasResolvableAuth`). This is what keeps the
 	 * model-switch pre-flight off the event loop's hot path; the real key
 	 * (command execution + OAuth refresh) is resolved lazily per request via
 	 * {@link ModelRegistry.resolver}.
+	 *
+	 * Cross-provider env aliases count here (`xai-oauth` can borrow `XAI_API_KEY`)
+	 * so an explicit `xai-oauth/…` selector does not fail with "No API key".
+	 * Default-model availability still uses {@link AuthStorage.hasAuth}, which
+	 * ignores that alias so SuperGrok is not auto-selected from a paid key.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
 			isCommandConfigValue(keyConfig) ||
 			this.#keylessProviders.has(model.provider) ||
-			this.authStorage.hasAuth(model.provider)
+			this.authStorage.hasResolvableAuth(model.provider)
 		);
 	}
 
@@ -1791,7 +1804,10 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
-		const commandKey = this.#resolveCommandBackedApiKey(provider);
+		const commandKey = this.#resolveCommandBackedApiKey(
+			provider,
+			options?.forceRefresh ? { forceCommandRefresh: true } : undefined,
+		);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
@@ -2094,7 +2110,7 @@ export class ModelRegistry {
 				transportOverride,
 			);
 			this.#runtimeProviderOverrides.set(providerName, nextRuntimeOverride);
-			this.#unprojectedModels = this.#applyLlamaCppQwenThinkingToModels(
+			this.#unprojectedModels = this.#applyLlamaCppModelFixups(
 				this.#unprojectedModels.map(model => {
 					if (model.provider !== providerName) return model;
 					return this.#applyProviderTransportOverrideToModel(model, transportOverride);

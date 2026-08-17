@@ -217,11 +217,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		return this;
 	}
 
-	kill(reason?: Exception) {
+	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) this.#exitReasonPending = reason;
 		if (!this.proc.killed)
 			void Process.fromPid(this.proc.pid)
-				?.terminate()
+				?.terminate(gracefulMs === undefined ? undefined : { gracefulMs })
 				?.catch(e => void e);
 	}
 

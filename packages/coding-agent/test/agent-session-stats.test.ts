@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -7,23 +6,19 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession session stats", () => {
-	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
 	beforeAll(async () => {
-		tempDir = TempDir.createSync("@pi-session-stats-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
 	afterAll(() => {
 		authStorage.close();
-		tempDir.removeSync();
 	});
 
 	afterEach(async () => {

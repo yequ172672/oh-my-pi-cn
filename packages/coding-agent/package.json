@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "17.2.13",
+  "version": "17.3.5",
   "description": "omp coding agent 的简体中文本地化分支，包含设置、供应商配置、提示和 CLI 文案中文化",
   "homepage": "https://yequ172672.github.io/oh-my-pi-cn/",
   "author": "yequ172672",
@@ -45,8 +45,6 @@
     "format-prompts": "bun scripts/format-prompts.ts",
     "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
     "gen:bundle": "bun scripts/bundle-dist.ts",
-    "gen:mupdf": "bun scripts/embed-mupdf-wasm.ts --generate",
-    "gen:mupdf:reset": "bun scripts/embed-mupdf-wasm.ts --reset",
     "gen:native": "bun --cwd=../natives run gen:native",
     "gen:native:reset": "bun --cwd=../natives run gen:native:reset",
     "prepack": "bun run gen:tool-views && bun run gen:bundle",
@@ -77,7 +75,6 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
-    "mupdf": "catalog:",
     "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {
@@ -94,6 +91,7 @@
     "fork-release.json",
     "src",
     "dist/cli.js",
+    "dist/docs-index.generated.txt",
     "dist/CHANGELOG-*.md",
     "dist/*.node",
     "dist/template-*.css",

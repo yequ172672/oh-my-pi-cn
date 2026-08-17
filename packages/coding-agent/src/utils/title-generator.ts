@@ -4,7 +4,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -254,19 +254,28 @@ export async function generateTitleOnline(
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-			},
-			{
-				apiKey: registry.resolver(model, sessionId),
-				maxTokens,
-				disableReasoning: true,
-				metadata,
-				signal,
-			},
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt,
+						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, sessionId),
+						maxTokens,
+						disableReasoning: true,
+						// Greedy decode: titling is extraction, not generation. Backends that
+						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+						// from the message ("hashline" → "HasHroshi"). Providers whose models
+						// reject sampling params drop this via `supportsSamplingParams`.
+						temperature: 0,
+						metadata,
+						signal,
+					},
+				),
+			{ signal },
 		);
 
 		if (response.stopReason === "error") {

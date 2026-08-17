@@ -926,7 +926,8 @@ function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | 
 	return undefined;
 }
 
-function normalizeModelPatternList(value: string | string[] | undefined): string[] {
+/** Normalize comma-separated or array model selectors into an ordered pattern list. */
+export function normalizeModelPatternList(value: string | string[] | undefined): string[] {
 	if (!value) return [];
 	const patterns = Array.isArray(value) ? value.flatMap(pattern => pattern.split(",")) : value.split(",");
 	return patterns.map(pattern => pattern.trim()).filter(Boolean);
@@ -1192,6 +1193,42 @@ export function resolveAgentPrewalkPattern(options: AgentPrewalkResolutionOption
 	}
 	if (options.agentPrewalk === true) return DEFAULT_PREWALK_TARGET;
 	return agentPattern;
+}
+
+export interface AgentAdvisorResolutionOptions {
+	/** `task.agentAdvisor` settings value for this agent: `"on"`, `"off"`, or a model pattern. */
+	settingsOverride?: string;
+	/** Agent definition `advisor` frontmatter: `true` = default advisor-role model, string = custom model pattern. */
+	agentAdvisor?: boolean | string;
+}
+
+/** Effective advisor for one spawned agent: absent `model` resolves through the `advisor` role. */
+export interface AgentAdvisorSelection {
+	model?: string;
+}
+
+/**
+ * Effective advisor selection for a subagent, or `undefined` when the agent
+ * runs unadvised. The settings override decides enablement first ("off" wins,
+ * "on" enables with the agent's own model pattern or the `advisor` role, any
+ * other value is a custom model pattern); otherwise the agent definition's
+ * `advisor` field applies. A returned pattern lands on the spawned session's
+ * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
+ */
+export function resolveAgentAdvisorSelection(
+	options: AgentAdvisorResolutionOptions,
+): AgentAdvisorSelection | undefined {
+	const agentPattern =
+		typeof options.agentAdvisor === "string" && options.agentAdvisor.trim() ? options.agentAdvisor.trim() : undefined;
+	const override = options.settingsOverride?.trim();
+	if (override) {
+		const lowered = override.toLowerCase();
+		if (lowered === "off" || lowered === "false") return undefined;
+		if (lowered === "on" || lowered === "true") return { model: agentPattern };
+		return { model: override };
+	}
+	if (options.agentAdvisor === true) return {};
+	return agentPattern ? { model: agentPattern } : undefined;
 }
 
 /**

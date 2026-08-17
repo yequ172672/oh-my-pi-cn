@@ -14,20 +14,19 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("AgentSession advisor toggle", () => {
-	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 	let replacementModel: Model;
 
-	beforeAll(async () => {
-		sharedDir = TempDir.createSync("@pi-advisor-toggle-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		authStorage.setRuntimeApiKey("openai", "test-key");
 		authStorage.setRuntimeApiKey("openrouter", "test-key");
@@ -40,11 +39,8 @@ describe("AgentSession advisor toggle", () => {
 		replacementModel = replacement;
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		try {
-			await sharedDir.remove();
-		} catch {}
 	});
 
 	let tempDir: TempDir;

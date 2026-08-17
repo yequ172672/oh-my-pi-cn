@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -9,7 +8,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -26,16 +24,13 @@ interface HarnessOptions {
 	seedMessages?: Message[];
 }
 
-async function createHarness(tempDir: TempDir, authStorage: AuthStorage, options: HarnessOptions): Promise<Harness> {
+async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptions): Promise<Harness> {
 	const activeModel = getBundledModel(options.activeModel.provider, options.activeModel.id);
 	if (!activeModel) throw new Error(`Missing bundled model ${options.activeModel.provider}/${options.activeModel.id}`);
-	authStorage.setRuntimeApiKey(options.activeModel.provider, "test-key");
-
-	const modelRegistry = new ModelRegistry(authStorage);
 	const agent = new Agent({
 		initialState: { model: activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
 	});
-	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	const sessionManager = SessionManager.inMemory();
 	const seed = options.seedMessages ?? [{ role: "user", content: "hello", timestamp: Date.now() }];
 	for (const message of seed) sessionManager.appendMessage(message);
 	const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
@@ -110,26 +105,27 @@ async function createHarness(tempDir: TempDir, authStorage: AuthStorage, options
 
 describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	let session: AgentSession | undefined;
-	let authStorage: AuthStorage | undefined;
-	let tempDir: TempDir | undefined;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("aimlapi", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
 
 	afterEach(async () => {
-		try {
-			await session?.dispose();
-		} finally {
-			authStorage?.close();
-			await tempDir?.remove();
-			vi.restoreAllMocks();
-			session = undefined;
-			authStorage = undefined;
-			tempDir = undefined;
-		}
+		await session?.dispose();
+		vi.restoreAllMocks();
+		session = undefined;
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	it("downgrades to context-full when the active model cannot read snapcompact frames", async () => {
-		tempDir = TempDir.createSync("@pi-snapcompact-text-only-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		const harness = await createHarness(tempDir, authStorage, {
+		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
 		});
 		session = harness.session;
@@ -148,9 +144,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
-		tempDir = TempDir.createSync("@pi-snapcompact-unsupported-glyphs-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		const harness = await createHarness(tempDir, authStorage, {
+		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			seedMessages: [
 				{

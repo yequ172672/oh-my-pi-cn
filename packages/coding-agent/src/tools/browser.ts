@@ -69,7 +69,7 @@ const browserSchema = type({
 	"dialogs?": type("'accept' | 'dismiss'").describe("auto-handle dialogs"),
 	"code?": type("string").describe("js body to run in tab"),
 	"timeout?": type("number").describe("timeout in seconds"),
-	"all?": type("boolean").describe("close every tab"),
+	"all?": type("boolean").describe("release every managed tab"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
 });
 
@@ -133,7 +133,7 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 /**
  * Browser tool: stateful, multi-tab. Three actions:
  * - `open`  → acquire/create a named tab on a browser kind (headless | spawned | connected) and optionally goto a url.
- * - `close` → release a named tab (or all tabs); dispose browser when refcount hits 0.
+ * - `close` → release a named tab handle (or all handles); attached/relay pages remain open, and spawned pages remain unless killed.
  * - `run`   → execute JS code against an existing tab with `page`/`browser`/`tab` helpers in scope.
  */
 export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolDetails> {
@@ -204,7 +204,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			},
 		},
 		{
-			caption: "Close every tab and kill spawned-app processes",
+			caption: "Release every managed tab and kill spawned-app processes",
 			call: { action: "close", all: true, kill: true },
 		},
 	];
@@ -362,11 +362,11 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		const kill = !!params.kill;
 		if (params.all) {
 			const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
-			details.result = `Closed ${count} tab(s)`;
+			details.result = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 			return toolResult(details).text(details.result).done();
 		}
 		const closed = await untilAborted(signal, () => releaseTab(name, { kill, timeoutMs }));
-		details.result = closed ? `Closed tab ${JSON.stringify(name)}` : `No tab named ${JSON.stringify(name)}`;
+		details.result = closed ? `Released managed tab ${JSON.stringify(name)}` : `No tab named ${JSON.stringify(name)}`;
 		return toolResult(details).text(details.result).done();
 	}
 

@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, $flag } from "@oh-my-pi/pi-utils";
 import { hasConfiguredAwsProfile } from "../utils/aws-profile";
 import { AUTHENTICATED_SENTINEL } from "./types";
 
@@ -53,7 +53,8 @@ export function hasAwsCredentialSource(): boolean {
 }
 
 /** Registry key marker for AWS transports that resolve their own bearer/IAM credentials. */
-export function resolveAwsRegistryApiKey(): string | undefined {
+export function resolveAwsRegistryApiKey(options?: { allowSkipAuth?: boolean }): string | undefined {
+	if (options?.allowSkipAuth && $flag("AWS_BEDROCK_SKIP_AUTH")) return AUTHENTICATED_SENTINEL;
 	return hasAwsCredentialSource() ? AUTHENTICATED_SENTINEL : undefined;
 }
 

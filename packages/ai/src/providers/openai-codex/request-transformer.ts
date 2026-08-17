@@ -32,6 +32,8 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	/** User-facing effort; maps 1:1 onto the wire tier of the same name. */
 	reasoningEffort?: CodexCallerEffort | "none";
+	/** Suppress native reasoning by sending `reasoning.effort: "none"`. */
+	reasoningOff?: boolean;
 	reasoningSummary?: ReasoningConfig["summary"] | null;
 	/** Explicit `reasoning.context` override. Omitted by default; Responses Lite forces `all_turns` as required by that transport. */
 	reasoningContext?: CodexReasoningContext;
@@ -454,9 +456,12 @@ export async function transformRequestBody(
 		applyCodexResponsesLiteShape(body);
 	}
 
-	if (options.reasoningEffort !== undefined || responsesLite) {
-		const reasoningConfig =
-			options.reasoningEffort !== undefined ? getReasoningConfig(model, options.reasoningEffort, options) : {};
+	if (options.reasoningOff || options.reasoningEffort !== undefined || responsesLite) {
+		const reasoningConfig: Partial<ReasoningConfig> = options.reasoningOff
+			? { effort: "none" }
+			: options.reasoningEffort !== undefined
+				? getReasoningConfig(model, options.reasoningEffort, options)
+				: {};
 		body.reasoning = {
 			...body.reasoning,
 			...reasoningConfig,
@@ -478,7 +483,7 @@ export async function transformRequestBody(
 	// Catalog pro aliases (`gpt-5.6-*-pro`): applied after the effort branch so
 	// the mode is sent even when no effort is set (the branch above deletes
 	// `body.reasoning` in that case) — mode and effort are independent fields.
-	if (model.reasoningMode) {
+	if (model.reasoningMode && !options.reasoningOff) {
 		body.reasoning = { ...body.reasoning, mode: model.reasoningMode };
 	}
 

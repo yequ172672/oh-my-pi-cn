@@ -32,6 +32,7 @@ function createHangingSession(): HangingSessionHandle {
 	const { promise: hang, resolve: releaseHang } = Promise.withResolvers<void>();
 	const session: Partial<AgentSession> = {
 		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 		state: { messages: [] } as never,
 		agent: { state: { systemPrompt: ["test"] } } as never,
 		extensionRunner: undefined as never,
@@ -123,6 +124,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
 		const fastSession: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,
@@ -212,6 +214,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const lateSession = {
 			dispose: async () => lateDisposed.resolve(),
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 		} as unknown as AgentSession;
 		let lateInstall = registry.get("late-generation");
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async (options = {}) => {
@@ -251,6 +254,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const replacementSession = {
 			dispose: async () => {},
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 		} as unknown as AgentSession;
 		const replacement = registry.register({
 			id: "late-generation",
@@ -279,6 +283,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCount = 0;
 		const session: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,
@@ -358,6 +363,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCountBeforeYieldExecutionEnd: number | undefined;
 		const session: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,
@@ -459,6 +465,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const promptCalls: Array<{ text: string; options?: PromptOptions }> = [];
 		const session: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,
@@ -590,6 +597,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCountAfterFollowingTurn: number | undefined;
 		const session: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,
@@ -674,6 +682,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
 		const fastSession: Partial<AgentSession> = {
 			setIrcWakeTurnObserver: () => {},
+			subscribeRunState: () => () => {},
 			state: { messages: [] } as never,
 			agent: { state: { systemPrompt: ["test"] } } as never,
 			extensionRunner: undefined as never,

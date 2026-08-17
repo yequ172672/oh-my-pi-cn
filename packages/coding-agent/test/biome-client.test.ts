@@ -130,3 +130,44 @@ describe("BiomeClient format", () => {
 		expect(result).toBe(content);
 	});
 });
+
+describe("BiomeClient lint", () => {
+	test("surfaces Biome 2.x --reporter=json diagnostics", async () => {
+		const tempDir = await makeTempDir();
+		await Bun.write(
+			path.join(tempDir, "biome.json"),
+			`${JSON.stringify({ linter: { enabled: true, rules: { recommended: true } } })}\n`,
+		);
+		const targetFile = path.join(tempDir, "lint-me.ts");
+		// `x == 2` triggers lint/suspicious/noDoubleEquals (a recommended rule).
+		await Bun.write(targetFile, "const x: number = 1;\nif (x == 2) {\n}\n");
+
+		const diagnostics = await new BiomeClient(biomeConfig(repoBiome), tempDir).lint(targetFile);
+
+		const doubleEquals = diagnostics.find(d => d.code === "lint/suspicious/noDoubleEquals");
+		expect(doubleEquals).toBeDefined();
+		expect(doubleEquals?.source).toBe("biome");
+		expect(doubleEquals?.severity).toBe(1);
+		expect(doubleEquals?.message).toContain("==");
+		// Biome reports `==` at line 2, columns 7-9 (1-indexed); LSP ranges are
+		// 0-indexed, so the mapping must land on line 1, characters 6-8.
+		expect(doubleEquals?.range).toEqual({
+			start: { line: 1, character: 6 },
+			end: { line: 1, character: 8 },
+		});
+	});
+
+	test("returns no diagnostics for a clean file", async () => {
+		const tempDir = await makeTempDir();
+		await Bun.write(
+			path.join(tempDir, "biome.json"),
+			`${JSON.stringify({ linter: { enabled: true, rules: { recommended: true } } })}\n`,
+		);
+		const targetFile = path.join(tempDir, "clean.ts");
+		await Bun.write(targetFile, "export const value = 1;\n");
+
+		const diagnostics = await new BiomeClient(biomeConfig(repoBiome), tempDir).lint(targetFile);
+
+		expect(diagnostics).toEqual([]);
+	});
+});

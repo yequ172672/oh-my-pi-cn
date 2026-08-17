@@ -444,8 +444,11 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.status).toBe("stale");
 		expect(result.rendered).toBe("old-diff");
 
-		await Promise.resolve();
-		await Bun.sleep(5);
+		for (let i = 0; i < 100; i++) {
+			const refreshed = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
+			if (refreshed?.payload.refreshed) break;
+			await Bun.sleep(0);
+		}
 
 		expect(fetchFresh).toHaveBeenCalledTimes(1);
 		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);

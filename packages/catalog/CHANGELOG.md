@@ -2,6 +2,91 @@
 
 ## [Unreleased]
 
+## [17.3.5] - 2026-08-16
+
+### Added
+
+- Added support for GLM-5.3 on the z.AI provider, featuring a unified low/high/max reasoning-effort ladder across all hosts, mandatory thinking mode, 1M context, and default-model status for the z.AI provider.
+
+### Changed
+
+- Switched the paid xAI provider (xai / XAI_API_KEY) from Chat Completions to the OpenAI Responses API, aligning it with SuperGrok (xai-oauth) for prompt-cache affinity, reasoning-effort handling, and encrypted-reasoning replay.
+- Changed the paid xAI (XAI_API_KEY) default model to grok-4.5.
+- Changed the SuperGrok (xai-oauth) default model to grok-4.5.
+- Improved reasoning continuity for xAI models by requesting and replaying encrypted reasoning content across multi-turn Responses API calls.
+
+### Fixed
+
+- Fixed Codex Daybreak Blue and Red model discovery reporting zero token prices, which incorrectly labeled the models as free in the model picker.
+- Fixed Baseten's moonshotai/Kimi-K3 catalog metadata so its low/high/max thinking levels are available.
+- Fixed opencode-go/deepseek-v4-flash Responses requests sending forced named tool_choice selectors that are rejected while thinking mode is active.
+
+## [17.3.4] - 2026-08-14
+
+### Added
+
+- Added wire constants for Codex V2 remote-compaction feature negotiation.
+
+### Fixed
+
+- Fixed raw `COPILOT_GITHUB_TOKEN` credentials skipping plan-specific endpoint discovery, which routed GitHub Copilot Business model requests to the personal endpoint and returned HTTP 403. The GitHub Copilot model cache is now scoped per credential, so switching the token no longer serves another account's stale endpoint for the cache TTL ([#8507](https://github.com/can1357/oh-my-pi/issues/8507)).
+- Fixed the OpenRouter `deepseek/deepseek-v4-pro-0813` route silently clamping the reasoning effort to `high`: the dated SKU advertises (and accepts) the wire-exact `low`/`high`/`max` ladder, so its effort override no longer collapses to `high`-only. The undated `deepseek/deepseek-v4-pro` OpenRouter route stays `high`-only. ([#8517](https://github.com/can1357/oh-my-pi/issues/8517))
+
+## [17.3.2] - 2026-08-13
+
+### Added
+
+- Added support for the `deepseek-v4-pro:preview` model
+- Added support for the `gemini-3.7-flash` model
+- Added dynamic Antigravity client-version discovery from the official update manifest (darwin/arm64 channel), so version-gated models appear without a code change; `PI_AI_ANTIGRAVITY_VERSION` remains available as an override.
+
+### Fixed
+
+- Fixed Antigravity discovery missing Gemini 3.7 Flash: Cloud Code Assist gates newer models on the client version in the `User-Agent`, and the pinned `antigravity/hub/2.1.4` was too old. The user-agent now matches the captured 2.8.0 client format (`antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)`); os_type/arch stay pinned to the darwin/arm64 reference client. Overridable via `PI_AI_ANTIGRAVITY_VERSION` / `PI_AI_ANTIGRAVITY_CL` / `PI_AI_ANTIGRAVITY_OS` / `PI_AI_ANTIGRAVITY_ARCH`.
+
+### Removed
+
+- Removed `ANTIGRAVITY_SYSTEM_INSTRUCTION` from `wire/gemini-headers`; the Antigravity transport and web search no longer inject a fake identity prompt.
+
+## [17.3.1] - 2026-08-13
+
+### Added
+
+- Added dynamic Antigravity and Gemini CLI discovery support for Gemini 3.7 Flash, with low/medium/high thinking-level routing.
+
+### Changed
+
+- Updated model metadata, context windows, pricing, and configurations in the catalog
+
+## [17.3.0] - 2026-08-13
+
+### Breaking Changes
+
+- Removed `OpenAICompat.enableGeminiThinkingLoopGuard`; thinking-loop eligibility is derived solely from the `model.id` family.
+
+### Added
+
+- Added first-party OpenAI Daybreak Blue, Daybreak Red, and GPT-5.6 Cyber models with full support for their documented API pricing (including long-context rates above 272K input), token limits, tools, and reasoning effort controls (off/low/medium/high/xhigh/max).
+- Added calculateUncachedInputCost() to calculate prompt pricing against active context-length tiers without prompt caching.
+
+### Fixed
+
+- Fixed Anthropic cache-write pricing to correctly honor mixed 5-minute and 1-hour TTL usage instead of incorrectly charging all writes at the 5-minute rate.
+- Fixed Ollama Cloud DeepSeek V4 Flash and older reasoners to correctly apply the DeepSeek effort contract (e.g., low/high/max) instead of the generic effort ladder.
+- Added a default request timeout to OpenAI-compatible model discovery to prevent stalled provider endpoints from hanging startup indefinitely.
+- Fixed Anthropic cache-write pricing to honor mixed 5-minute and 1-hour TTL usage instead of charging every write at the 5-minute rate.
+- Fixed Ollama Cloud DeepSeek V4 Flash (including dated/preview tags like `deepseek-v4-flash:0731`) exposing the generic `minimal`/`low`/`medium`/`high`/`xhigh` effort ladder without `max`; the `ollama-chat` transport now applies the DeepSeek effort contract (Flash → `low`/`high`/`max`, older reasoners → `high`/`max`), matching the direct API and every other host ([#8334](https://github.com/can1357/oh-my-pi/issues/8334)).
+- Exposed the `low` reasoning-effort tier for DeepSeek V4 Pro on the direct API and faithful aggregator routes, matching DeepSeek's updated API contract advertising `reasoning_effort` `low`/`high`/`max` for both V4 SKUs; OpenRouter's non-Flash route still exposes only `high`, and the older V3.x/R1 reasoners remain `high`/`max` ([#8405](https://github.com/can1357/oh-my-pi/issues/8405)).
+- Bounded OpenAI-compatible model discovery with a default request timeout so a stalled provider `/models` endpoint can no longer hang startup indefinitely in `resolveModelDiscoveryFallback` ([#8315](https://github.com/can1357/oh-my-pi/issues/8315)).
+- Fixed Codex-discovered `gpt-daybreak-*` aliases being treated as unknown models, restoring the GPT-5.6 `low`/`medium`/`high`/`xhigh`/`max` effort ladder and its 372K fallback only when the Codex registry omits `context_window`.
+- Fixed first-party OpenAI GPT-5.6 aliases to preserve wire-level `off` through generated pro aliases and to price requests above 272K input at each SKU's documented long-context rates.
+
+## [17.2.15] - 2026-08-12
+
+### Fixed
+
+- Fixed classification of model IDs with large minor versions (e.g., `claude-opus-5-11`) or three-part versions, ensuring they no longer fall back to stale default configurations.
+
 ## [17.2.13] - 2026-08-11
 
 ### Changed

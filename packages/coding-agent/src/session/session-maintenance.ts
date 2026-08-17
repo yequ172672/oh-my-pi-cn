@@ -196,7 +196,7 @@ export interface SessionMaintenanceHost {
 	planReferencePath(): string;
 	nonMessageTokenSource(): NonMessageTokenSource;
 	memoryBackendSession(): MemoryBackendOperationContext["session"];
-	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
@@ -247,7 +247,7 @@ export interface SessionMaintenanceHost {
 	dropImages(): Promise<{ removed: number }>;
 	runHandoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined>;
 	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
-	dropPersistedAssistantTurn(message: AssistantMessage): Promise<void>;
+	dropPersistedAssistantTurn(message: AssistantMessage): Promise<string | undefined>;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -312,6 +312,15 @@ export class SessionMaintenance {
 
 	set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined) {
 		this.#skipPostTurnMaintenanceAssistantTimestamp = timestamp;
+	}
+
+	/**
+	 * Emit a compaction lifecycle event. Mid-turn callers detach only extension
+	 * fan-out for post-commit events; ordered subscriber delivery still completes
+	 * before maintenance returns.
+	 */
+	#emitLifecycleEvent(event: AgentSessionEvent, detach: boolean): Promise<void> {
+		return this.#host.emitSessionEvent(event, detach ? { detachExtensions: true } : undefined);
 	}
 	/**
 	 * Append plan-read protection to a prune/shake config so the active plan
@@ -906,7 +915,7 @@ export class SessionMaintenance {
 				firstKeptEntryId,
 				tokensBefore,
 				details,
-				preserveData,
+				preserveData: snapcompact.stripPreservedArchive(preserveData),
 			};
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
@@ -1097,6 +1106,16 @@ export class SessionMaintenance {
 			.find((message): message is AssistantMessage => message.role === "assistant");
 		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
 
+		// Decide from the live agent context before waiting for the asynchronous
+		// session journal. The persistence barrier is required only when maintenance
+		// will actually rewrite history; awaiting it on every ordinary tool turn lets
+		// a slow message_end listener leave the TUI "generating" with no provider
+		// request or tool running.
+		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
+		const storedContextTokens = this.#estimateStoredContextTokens();
+		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
 			// A prior boundary already ran the dead-end rescue and could not reduce
@@ -1117,11 +1136,6 @@ export class SessionMaintenance {
 			this.#midTurnCompactionDeadEnds.delete(activeMessages);
 			this.#midTurnDeadEndPendingPrePrompt = false;
 		}
-
-		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
-		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -1145,6 +1159,7 @@ export class SessionMaintenance {
 			suppressHandoff: true,
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
+			detachPostCommit: true,
 		});
 		if (result.automaticContinuationBlocked) {
 			this.#midTurnCompactionDeadEnds.add(activeMessages);
@@ -1817,38 +1832,57 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Retry-side counterpart to {@link #compactionCreatedHeadroom}. An
-	 * overflow/incomplete recovery only needs the rebuilt prompt to *fit* the
-	 * window again — it does not have to land under the compaction threshold, let
-	 * alone the stricter `COMPACTION_RECOVERY_BAND × threshold` hysteresis the
-	 * auto-continue thrash guard uses. Reusing the band here turned recoverable
-	 * overflows into manual dead-ends: a 200k-window prompt compacted from
-	 * overflow down to ~150k is comfortably retryable, but sits above
-	 * `0.8 × 170k = 136k` and was wrongly refused (PR #3412 review).
+	 * Whether the current stored context fits `model`'s usable window
+	 * (`contextWindow - reserve`), using the same reserve resolution as
+	 * compaction. This is deliberately independent of `compaction.enabled`: an
+	 * oversized request overflows the provider whether or not compaction would
+	 * have run, so a fit check must judge the raw budget.
 	 *
-	 * Measures residual context against the usable budget (`contextWindow - reserve`).
 	 * The default absolute reserve can exceed bundled small-context windows, or
 	 * nearly consume a 16k-class window; those known-impossible defaults fall
 	 * back to the proportional 15% reserve. Explicit valid reserves still define
-	 * the usable prompt budget so retries do not enter headroom the user
-	 * intentionally reserved. Callers MUST
-	 * invoke this AFTER dropping the failed assistant from `this.#host.messages()`, so
-	 * the just-failed turn (which the retry prompt will not include) is excluded
-	 * from the estimate.
+	 * the usable prompt budget so callers do not enter headroom the user
+	 * intentionally reserved.
 	 *
-	 * When the model/window is unknown we cannot evaluate the budget, so we
-	 * optimistically allow the retry (preserving prior behavior).
+	 * Used by the retry-fallback selector to skip a candidate whose window cannot
+	 * hold the retry context before switching onto it, and (via
+	 * {@link #compactionCreatedRetryFit}) to decide whether an overflow recovery
+	 * produced a retryable prompt. `excludedMessage` identifies a failed assistant
+	 * turn that will be removed before retrying; subtracting it makes the selector
+	 * judge the request that will actually be sent. When the window is unknown we
+	 * cannot evaluate the budget, so we optimistically report a fit (preserving
+	 * prior behavior).
 	 */
-	#compactionCreatedRetryFit(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
+		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
+		const activeExcludedMessage =
+			excludedMessage && this.#host.messages().includes(excludedMessage) ? excludedMessage : undefined;
+		const providerExcludedTokens = activeExcludedMessage ? estimateTokens(activeExcludedMessage) : 0;
+		const storedExcludedTokens = activeExcludedMessage
+			? estimateTokens(activeExcludedMessage, { excludeEncryptedReasoning: true })
+			: 0;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
-			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
-			this.#estimateStoredContextTokens(),
+			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
+			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
+	}
+
+	/**
+	 * Retry-side check: whether an overflow/incomplete recovery rebuilt a prompt
+	 * that fits the active model's window again. Callers MUST invoke this AFTER
+	 * dropping the failed assistant from `this.#host.messages()` so the just-failed
+	 * turn (absent from the retry prompt) is excluded from the estimate. Unlike
+	 * the `COMPACTION_RECOVERY_BAND × threshold` hysteresis the auto-continue
+	 * thrash guard uses, a retry only needs to *fit* — a 200k-window prompt
+	 * compacted from overflow down to ~150k is retryable even though it sits above
+	 * `0.8 × 170k` (PR #3412 review).
+	 */
+	#compactionCreatedRetryFit(): boolean {
+		return this.#model ? this.contextFitsModel(this.#model) : true;
 	}
 
 	/**
@@ -2142,6 +2176,8 @@ export class SessionMaintenance {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			/** Mid-turn: splice history then return; do not await UI/extension fan-out. */
+			detachPostCommit?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -2167,6 +2203,7 @@ export class SessionMaintenance {
 				terminalTextAnswer,
 				options.triggerContextTokens,
 				suppressContinuation,
+				options.detachPostCommit === true,
 			);
 			if (outcome !== "fallback") return outcome;
 			fallbackFromShake = true;
@@ -2228,7 +2265,8 @@ export class SessionMaintenance {
 			// for any listener — and for input routed during this emit's event-loop yield:
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
-			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			const startEvent = { type: "auto_compaction_start" as const, reason, action };
+			await this.#emitLifecycleEvent(startEvent, false);
 			if (action === "handoff") {
 				let handoffSwitchCancelled = false;
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
@@ -2242,13 +2280,16 @@ export class SessionMaintenance {
 				if (!handoffResult) {
 					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
 					if (aborted) {
-						await this.#host.emitSessionEvent({
-							type: "auto_compaction_end",
-							action,
-							result: undefined,
-							aborted: true,
-							willRetry: false,
-						});
+						await this.#emitLifecycleEvent(
+							{
+								type: "auto_compaction_end",
+								action,
+								result: undefined,
+								aborted: true,
+								willRetry: false,
+							},
+							options.detachPostCommit === true,
+						);
 						return COMPACTION_CHECK_NONE;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
@@ -2257,13 +2298,16 @@ export class SessionMaintenance {
 					action = "context-full";
 				}
 				if (handoffResult) {
-					await this.#host.emitSessionEvent({
-						type: "auto_compaction_end",
-						action,
-						result: undefined,
-						aborted: false,
-						willRetry: false,
-					});
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+						},
+						options.detachPostCommit === true,
+					);
 					const continuationScheduled =
 						!autoCompactionSignal.aborted &&
 						this.#host.scheduleCompactionContinuation({
@@ -2280,27 +2324,33 @@ export class SessionMaintenance {
 			}
 
 			if (!this.#model) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					skipped: true,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: true,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 
 			const availableModels = this.#host.modelRegistry.getAvailable();
 			if (availableModels.length === 0) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					skipped: true,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: true,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -2387,14 +2437,20 @@ export class SessionMaintenance {
 					// compaction entry — surface it as a real (non-skipped) result so
 					// the TUI rebuilds the transcript instead of treating the pass as
 					// a benign no-op.
-					await this.#host.emitSessionEvent({
-						type: "auto_compaction_end",
-						action,
-						result: frameRescueResult,
-						aborted: false,
-						willRetry: false,
-						skipped: frameRescueResult === undefined,
-					});
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: frameRescueResult && {
+								...frameRescueResult,
+								preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
+							},
+							aborted: false,
+							willRetry: false,
+							skipped: frameRescueResult === undefined,
+						},
+						options.detachPostCommit === true,
+					);
 					let continuationScheduled = false;
 					if (frameRescueCreatedHeadroom) {
 						continuationScheduled = this.#host.scheduleCompactionContinuation({
@@ -2442,13 +2498,16 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
-					await this.#host.emitSessionEvent({
-						type: "auto_compaction_end",
-						action,
-						result: undefined,
-						aborted: true,
-						willRetry: false,
-					});
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						options.detachPostCommit === true,
+					);
 					return COMPACTION_CHECK_NONE;
 				}
 
@@ -2625,6 +2684,11 @@ export class SessionMaintenance {
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets,
 									codexCompaction,
+									// This loop already retries the whole compaction attempt on
+									// transient errors, so the summarization oneshots must not
+									// retry too — the budgets would multiply and each outer
+									// wait would stack on top of an inner backoff.
+									oneshotRetry: false,
 								},
 							);
 							break;
@@ -2736,13 +2800,16 @@ export class SessionMaintenance {
 			}
 
 			if (autoCompactionSignal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -2777,11 +2844,20 @@ export class SessionMaintenance {
 				| undefined;
 
 			if (this.#host.extensionRunner && savedCompactionEntry) {
-				await this.#host.extensionRunner.emit({
+				const compactEmit = this.#host.extensionRunner.emit({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
 				});
+				if (options.detachPostCommit) {
+					void compactEmit.catch(error => {
+						logger.warn("Detached session_compact emit failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+				} else {
+					await compactEmit;
+				}
 			}
 
 			const result: CompactionResult = {
@@ -2790,7 +2866,7 @@ export class SessionMaintenance {
 				firstKeptEntryId,
 				tokensBefore,
 				details,
-				preserveData,
+				preserveData: snapcompact.stripPreservedArchive(preserveData),
 			};
 			// Post-maintenance progress guard — evaluated BEFORE emitting
 			// auto_compaction_end so the TUI rebuild triggered by that event
@@ -2883,7 +2959,10 @@ export class SessionMaintenance {
 				}
 			}
 
-			await this.#host.emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
+			await this.#emitLifecycleEvent(
+				{ type: "auto_compaction_end", action, result, aborted: false, willRetry },
+				options.detachPostCommit === true,
+			);
 
 			if (retryFits) {
 				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
@@ -2904,29 +2983,35 @@ export class SessionMaintenance {
 			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage:
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: reason === "incomplete"
-							? `Incomplete response recovery failed: ${errorMessage}`
-							: `Auto-compaction failed: ${errorMessage}`,
-			});
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage:
+						reason === "overflow"
+							? `Context overflow recovery failed: ${errorMessage}`
+							: reason === "incomplete"
+								? `Incomplete response recovery failed: ${errorMessage}`
+								: `Auto-compaction failed: ${errorMessage}`,
+				},
+				options.detachPostCommit === true,
+			);
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
@@ -2953,6 +3038,7 @@ export class SessionMaintenance {
 		terminalTextAnswer: boolean,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
+		detachPostCommit = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -2960,16 +3046,19 @@ export class SessionMaintenance {
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
 		try {
-			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					detachPostCommit,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
@@ -3012,25 +3101,31 @@ export class SessionMaintenance {
 				const errorMessage = reclaimed
 					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; falling back to context-full compaction.`
 					: "Auto-shake found nothing eligible to drop; falling back to context-full compaction.";
-				await this.#host.emitSessionEvent({
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: !reclaimed,
+						errorMessage,
+					},
+					detachPostCommit,
+				);
+				return "fallback";
+			}
+			await this.#emitLifecycleEvent(
+				{
 					type: "auto_compaction_end",
 					action,
 					result: undefined,
 					aborted: false,
-					willRetry: false,
+					willRetry,
 					skipped: !reclaimed,
-					errorMessage,
-				});
-				return "fallback";
-			}
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry,
-				skipped: !reclaimed,
-			});
+				},
+				detachPostCommit,
+			);
 
 			let continuationScheduled = false;
 			if (willRetry) {
@@ -3069,25 +3164,31 @@ export class SessionMaintenance {
 			};
 		} catch (error) {
 			if (signal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					detachPostCommit,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage: message,
-				skipped: false,
-			});
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: message,
+					skipped: false,
+				},
+				detachPostCommit,
+			);
 			// Overflow still needs recovery even if shake threw.
 			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
 		} finally {

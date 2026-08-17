@@ -98,7 +98,7 @@ async function createSession(
 
 	const sessionManager = SessionManager.inMemory(tempDir);
 	const settings = Settings.isolated({ "edit.streamingAbort": true });
-	const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 

@@ -86,14 +86,14 @@ describe("ToolExecutionComponent detached task freeze", () => {
 		vi.restoreAllMocks();
 	});
 
-	function makeComponent(live: () => boolean) {
+	function makeComponent(live: () => boolean, uncommitted: () => boolean = () => true) {
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const ui = { requestRender, requestComponentRender } as unknown as TUI;
 		const component = new ToolExecutionComponent(
 			"task",
 			{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
-			{ liveRegion: { isBlockInLiveRegion: () => live() } },
+			{ liveRegion: { isBlockInLiveRegion: () => live(), isBlockUncommitted: () => uncommitted() } },
 			undefined,
 			ui,
 		);
@@ -117,6 +117,25 @@ describe("ToolExecutionComponent detached task freeze", () => {
 		const frameB = component.render(100).join("\n");
 		expect(frameB).toBe(frameA);
 		expect(stripVTControlCharacters(frameA)).toContain("scouting the auth flow");
+	});
+
+	it("reveals the latest hidden progress before freezing the card", () => {
+		const { component } = makeComponent(() => false);
+		component.setToolActivityVisible(false);
+
+		component.updateResult(asyncSnapshot("initial hidden progress"), true);
+		component.updateResult(asyncSnapshot("latest hidden progress"), true);
+		expect(component.render(100)).toEqual([]);
+
+		component.setToolActivityVisible(true);
+		const revealed = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(revealed).toContain("latest hidden progress");
+		expect(revealed).not.toContain("initial hidden progress");
+
+		component.updateResult(asyncSnapshot("progress after entering history"), true);
+		const frozen = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(frozen).toContain("latest hidden progress");
+		expect(frozen).not.toContain("progress after entering history");
 	});
 
 	it("drops partial snapshots after the freeze but still applies the final result", () => {

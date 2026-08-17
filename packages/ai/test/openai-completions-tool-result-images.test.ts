@@ -51,6 +51,7 @@ const compat: ResolvedOpenAICompat = {
 	toolStrictMode: "none",
 	supportsReasoningParams: true,
 	supportsSamplingParams: true,
+	supportsPenaltyAndStopParams: true,
 	alwaysSendMaxTokens: false,
 	isOpenRouterHost: false,
 	isVercelGatewayHost: false,
@@ -227,7 +228,7 @@ describe("openai-completions convertMessages", () => {
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "toolCall", id: emptyNormalizingId, name: "read", arguments: { path: "README.md" } }],
-			api: model.api,
+			api: "openai-responses",
 			provider: model.provider,
 			model: model.id,
 			usage: emptyUsage,
@@ -394,8 +395,11 @@ describe("openai-completions convertMessages", () => {
 	it("preserves image_url for DashScope compatible-mode multimodal Qwen models", () => {
 		// Counter-cases for the issue #1859 guard: DashScope also exposes
 		// genuinely multimodal Qwen ids without `vl` in the name (`qwen3.7-plus`),
-		// so the text-only override must be limited to known text-only families.
-		for (const id of ["qwen3.7-plus", "qwen-vl-max"]) {
+		// and Qwen-Max is multimodal from `qwen3.8-max` onward (issue #8305) —
+		// including `qwen3.10-max`, which a decimal-float compare would wrongly
+		// sort below 3.8 — so the text-only override must stay limited to the
+		// known text-only families.
+		for (const id of ["qwen3.7-plus", "qwen-vl-max", "qwen3.8-max", "qwen3.8-max-preview", "qwen3.10-max"]) {
 			const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 			const model: Model<"openai-completions"> = {
 				...baseModel,

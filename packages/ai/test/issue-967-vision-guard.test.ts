@@ -28,6 +28,7 @@ const compat: ResolvedOpenAICompat = {
 	supportsReasoningEffort: true,
 	supportsReasoningParams: true,
 	supportsSamplingParams: true,
+	supportsPenaltyAndStopParams: true,
 	alwaysSendMaxTokens: false,
 	isOpenRouterHost: false,
 	isVercelGatewayHost: false,

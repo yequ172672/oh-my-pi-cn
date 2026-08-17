@@ -25,6 +25,8 @@ interface PersistedAgentMetadata {
 	createdAt?: number;
 	lastActivity?: number;
 	history?: AgentHistorySummary;
+	/** True when the file is only a SessionManager header (no session_init, no messages). */
+	incomplete?: boolean;
 }
 
 interface PersistedTranscript {
@@ -244,6 +246,8 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 	let createdAt: number | undefined;
 	let activity: string | undefined;
 	let history: AgentHistorySummary = {};
+	let hasSessionInit = false;
+	let hasConversation = false;
 	try {
 		await visitEntriesFromFileStream(
 			sessionFile,
@@ -264,7 +268,12 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 					}
 					return;
 				}
+				if (record.type === "message" || record.type === "custom_message") {
+					hasConversation = true;
+					return;
+				}
 				if (record.type !== "session_init") return;
+				hasSessionInit = true;
 				createdAt ??= timestampOf(record.timestamp);
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
 				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
@@ -290,6 +299,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 		activity,
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
+		incomplete: !hasSessionInit && !hasConversation,
 		history: {
 			...history,
 			...(hasOutput ? { outputPath } : {}),
@@ -425,26 +435,36 @@ async function registerPersistedSubagentsFromDir(
 		if (!registry.get(id)) {
 			const metadata = await readPersistedAgentMetadata(sessionFile);
 			if (!shouldContinue()) return;
-			registry.register({
-				id,
-				displayName: id,
-				kind: "sub",
-				parentId: parentId ?? MAIN_AGENT_ID,
-				session: null,
-				sessionFile,
-				activity: metadata.activity,
-				createdAt: metadata.createdAt,
-				lastActivity: metadata.lastActivity,
-				history: metadata.history,
-				status: tombstoned ? "aborted" : "parked",
-			});
-			const ref = registry.get(id);
-			transcripts.push({
-				id,
-				sessionFile,
-				createdAt: ref?.createdAt,
-				lastActivity: ref?.lastActivity,
-			});
+			// Metadata reads yield. A spawn may claim the id while this scan is
+			// inspecting the file; never replace that live generation with a
+			// transcript-derived parked ref.
+			const unclaimed = !registry.get(id);
+			// SessionManager.open writes title+session before createAgentSession
+			// claims the id. Parking that stub makes the spawn's expectedAgentRef:null
+			// CAS fail with "already owned by another session generation".
+			if (unclaimed && metadata.incomplete && !tombstoned) continue;
+			if (unclaimed) {
+				registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					parentId: parentId ?? MAIN_AGENT_ID,
+					session: null,
+					sessionFile,
+					activity: metadata.activity,
+					createdAt: metadata.createdAt,
+					lastActivity: metadata.lastActivity,
+					history: metadata.history,
+					status: tombstoned ? "aborted" : "parked",
+				});
+				const ref = registry.get(id);
+				transcripts.push({
+					id,
+					sessionFile,
+					createdAt: ref?.createdAt,
+					lastActivity: ref?.lastActivity,
+				});
+			}
 		}
 		await registerPersistedSubagentsFromDir(
 			registry,

@@ -400,17 +400,58 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("90%");
 	});
 
-	it("does not render monthly usage for non-Cursor providers", async () => {
+	it("renders all three OpenCode Go windows including monthly", async () => {
+		const now = Date.now();
 		const component = makeComponent(
 			[
 				{
 					provider: "opencode-go",
 					limits: [
-						{ id: "opencode-go:usd:monthly", scope: { windowId: "monthly" }, amount: { usedFraction: 0.42 } },
+						{
+							id: "rolling-5h",
+							scope: { windowId: "5h" },
+							window: { id: "5h", durationMs: 5 * 3_600_000, resetsAt: now + 90 * 60_000 },
+							amount: { used: 12, usedFraction: 0.12, unit: "percent" },
+						},
+						{
+							id: "weekly",
+							scope: { windowId: "7d" },
+							window: { id: "7d", durationMs: 7 * 86_400_000, resetsAt: now + 100 * 3_600_000 },
+							amount: { used: 8, usedFraction: 0.08, unit: "percent" },
+						},
+						{
+							id: "monthly",
+							scope: { windowId: "monthly" },
+							window: { id: "monthly", resetsAt: now + 160 * 3_600_000 },
+							amount: { used: 42, usedFraction: 0.42, unit: "percent" },
+						},
 					],
 				},
 			],
 			{ provider: "opencode-go" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("5h");
+		expect(content).toContain("12%");
+		expect(content).toContain("7d");
+		expect(content).toContain("8%");
+		expect(content).toContain("mo");
+		expect(content).toContain("42%");
+	});
+
+	it("does not render monthly usage for providers outside the single-bucket gate", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "github-copilot",
+					limits: [{ id: "copilot:premium", scope: { windowId: "monthly" }, amount: { usedFraction: 0.42 } }],
+				},
+			],
+			{ provider: "github-copilot" },
 		);
 
 		component.refreshUsageInBackground();

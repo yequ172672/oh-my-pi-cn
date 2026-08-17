@@ -77,6 +77,7 @@ import {
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
+import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	escapeHarmonyControlTokens,
@@ -889,19 +890,18 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 		conflictDisableReason !== undefined ||
 		(modelSupported && disabledWithoutRequest) ||
 		disabledByNoneEffort;
-	if (
-		disabled &&
-		disableReason === "caller" &&
-		requestedEffort === undefined &&
-		disableMode === "lowest-effort" &&
-		compat.supportsReasoningEffort &&
-		!omitReasoningEffort
-	) {
-		const minEffort = getSupportedEfforts(model)[0];
-		if (minEffort === undefined) {
-			throw new AIError.ConfigurationError(`Model ${model.provider}/${model.id} has no supported reasoning efforts`);
+	if (disabled && compat.supportsReasoningEffort && !omitReasoningEffort) {
+		if (disableMode === "none-effort") {
+			wireEffort = "none";
+		} else if (disableReason === "caller" && requestedEffort === undefined && disableMode === "lowest-effort") {
+			const minEffort = getSupportedEfforts(model)[0];
+			if (minEffort === undefined) {
+				throw new AIError.ConfigurationError(
+					`Model ${model.provider}/${model.id} has no supported reasoning efforts`,
+				);
+			}
+			wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 		}
-		wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 	}
 
 	return {
@@ -954,6 +954,9 @@ function encodeChatCompletionsDisabledReasoning(
 ): void {
 	delete params.reasoning_effort;
 	switch (disableMode) {
+		case "none-effort":
+			params.reasoning_effort = "none";
+			break;
 		case "zai-thinking-disabled":
 			params.thinking = { type: "disabled" };
 			break;
@@ -1067,7 +1070,7 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 	if (
 		reasoning.disableReason === "caller" &&
 		reasoning.requestedEffort === undefined &&
-		reasoning.disableMode === "lowest-effort" &&
+		(reasoning.disableMode === "lowest-effort" || reasoning.disableMode === "none-effort") &&
 		reasoning.wireEffort !== undefined
 	) {
 		params.reasoning_effort = reasoning.wireEffort as Effort;
@@ -2428,6 +2431,20 @@ export function finalizeMessageText(item: ResponseOutputMessage, streamedText: s
 	if (!item.content?.length) return streamedText || "";
 	return item.content.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? ""))).join("");
 }
+export const JUICE_EFFORT_MAP: Record<string, number> = {
+	none: 0,
+	minimal: 2,
+	low: 4,
+	medium: 8,
+	high: 48,
+	xhigh: 112,
+	max: 960,
+};
+
+export function getJuiceValue(effort?: string): number {
+	if (!effort) return 8;
+	return JUICE_EFFORT_MAP[effort] ?? 8;
+}
 
 export function accumulateToolCallArgumentsDelta(
 	block: ResponsesToolCallBlock,
@@ -2759,6 +2776,10 @@ export async function processResponsesStream<TApi extends Api>(
 		output.content.indexOf(block);
 
 	let sawFirstToken = false;
+	// Whether the current stream produced a completed native `web_search_call`
+	// output item. A provider-hosted search that finishes without yield is
+	// progress evidence: the turn should pause for continuation rather than end.
+	let sawCompletedWebSearchCall = false;
 
 	for await (const event of openaiStream) {
 		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
@@ -3045,6 +3066,10 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			} else if (item.type === "web_search_call" && (item.status === undefined || item.status === "completed")) {
+				// A completed provider-hosted web search is progress evidence even when
+				// the model never surfaced an answer; the agent loop continues from it.
+				sawCompletedWebSearchCall = true;
 			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
 				appendResponsesImageResult(output, stream, item.result);
 			}
@@ -3095,6 +3120,14 @@ export async function processResponsesStream<TApi extends Api>(
 				(response as { end_turn?: boolean } | undefined)?.end_turn,
 				shouldPromoteIncompleteToolUse,
 			);
+			// A completed provider-hosted web search that yielded no visible answer
+			// (no text, image, or client tool call) is progress, not a dead end:
+			// pause the turn so the agent loop re-samples with the search results
+			// instead of silently ending. Reasoning/native output items are preserved
+			// for replay. A search followed by visible output stays a normal stop.
+			if (sawCompletedWebSearchCall && output.stopReason === "stop" && !hasVisibleAssistantContent(output)) {
+				output.stopDetails = { type: "pause_turn" };
+			}
 			options?.onCompleted?.();
 			// `response.completed`/`response.incomplete`/`response.done` is the last event of a
 			// Responses stream. Stop pulling instead of waiting for the server to
@@ -3275,7 +3308,7 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 	params: P,
 	options: CommonSamplingOptions | undefined,
 	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
-		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams">;
+		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams" | "supportsPenaltyAndStopParams">;
 	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {
@@ -3292,8 +3325,10 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 		if (options?.topP !== undefined) params.top_p = options.topP;
 		if (options?.topK !== undefined) params.top_k = options.topK;
 		if (options?.minP !== undefined) params.min_p = options.minP;
-		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		if (model.compat.supportsPenaltyAndStopParams) {
+			if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+			if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		}
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
@@ -3308,6 +3343,14 @@ type ReasoningOptions = {
 export interface ApplyResponsesCompatPolicyOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	mapEffort?: (effort: string) => string;
+	/**
+	 * Suppress native reasoning by sending `reasoning.effort: "none"` — the only
+	 * disable level the Responses API defines (`"off"` is not a wire value and
+	 * 400s everywhere). Gateways that reject `none` for a given model are
+	 * handled by the reasoning-effort fallback retry, which clamps to the
+	 * lowest level the error reports as allowed.
+	 */
+	forceReasoningOff?: boolean;
 }
 
 export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreaming>(
@@ -3316,6 +3359,10 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 	options: ApplyResponsesCompatPolicyOptions | undefined,
 ): void {
 	const reasoning = policy.reasoning;
+	if (options?.forceReasoningOff) {
+		params.reasoning = { effort: "none" } as P["reasoning"];
+		return;
+	}
 	if (!reasoning.modelSupported) return;
 	if (reasoning.includeEncryptedReasoning) {
 		const include = params.include ?? [];
@@ -3329,7 +3376,7 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 			return;
 		}
 		if (
-			reasoning.disableMode === "lowest-effort" &&
+			(reasoning.disableMode === "lowest-effort" || reasoning.disableMode === "none-effort") &&
 			reasoning.wireEffort !== undefined &&
 			!reasoning.omitReasoningEffort
 		) {

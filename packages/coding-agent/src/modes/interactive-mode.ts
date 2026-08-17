@@ -50,6 +50,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	sanitizeText,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -82,13 +83,14 @@ import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
 import { localizeUiText } from "../i18n";
-import { resolveLocalUrlToPath } from "../internal-urls";
+import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
 	formatMCPConnectionStatusMessage,
 	isMcpConnectionStatusEvent,
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
+	type McpConnectionFailure,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
@@ -199,6 +201,7 @@ import {
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -358,6 +361,20 @@ function readPersistedToolNames(value: unknown): string[] | undefined {
 	return value as string[];
 }
 
+export function shouldEnterPlanModeOnStartup(
+	sessionManager: Pick<SessionManager, "buildSessionContext" | "getEntries">,
+	sessionSettings: Pick<Settings, "get">,
+): boolean {
+	const hasConversationContext = sessionManager.buildSessionContext().messages.length > 0;
+	const hasExplicitMode = sessionManager.getEntries().some(entry => entry.type === "mode_change");
+	return (
+		!hasConversationContext &&
+		!hasExplicitMode &&
+		sessionSettings.get("plan.defaultOnStartup") &&
+		sessionSettings.get("plan.enabled")
+	);
+}
+
 /** Options for creating an InteractiveMode instance (for future API use) */
 export interface InteractiveModeOptions {
 	/** Providers that were migrated during startup */
@@ -375,15 +392,19 @@ export interface InteractiveModeOptions {
 /**
  * Anchored live-region container for the HUD/status rows between the transcript
  * and the editor (working loader, todo + subagent HUDs, transient notification
- * panels). While it has content every row is live: it reports a seam at 0 so the
- * engine never commits these anchored, rebuilt-in-place rows to native
- * scrollback — otherwise stale duplicates pile up above the live copy on short
- * terminals once the loader sits below a tall HUD. The transcript's own seam,
+ * panels). While it has content every row is live: it reports a seam at 0 and
+ * pins that live region so the engine never commits these anchored,
+ * rebuilt-in-place rows to native scrollback — otherwise stale duplicates pile
+ * up above the live copy on short terminals once the loader sits below a tall HUD. The transcript's own seam,
  * when present, sits higher and wins (topmost-seam merge in TUI.render).
  */
 class AnchoredLiveContainer extends Container implements NativeScrollbackLiveRegion {
 	getNativeScrollbackLiveRegionStart(): number | undefined {
 		return this.children.length > 0 ? 0 : undefined;
+	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return true;
 	}
 }
 
@@ -724,7 +745,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
-	#mcpFailedServers = new Map<string, string>();
+	#mcpFailedServers = new Map<string, { error: string; sourcePath?: string }>();
 	#welcomeComponent?: WelcomeComponent;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
@@ -799,7 +820,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
 		this.#syncEditorMaxHeight();
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
@@ -839,6 +860,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
+		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
 
@@ -897,7 +919,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#trackMcpStatusServer(event.serverName);
 			this.#mcpPendingServers.delete(event.serverName);
 			this.#mcpConnectedServers.delete(event.serverName);
-			this.#mcpFailedServers.set(event.serverName, event.error);
+			this.#mcpFailedServers.set(event.serverName, {
+				error: event.error,
+				sourcePath: event.sourcePath,
+			});
 		}
 
 		const message = formatMCPConnectionStatusMessage({
@@ -918,10 +943,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#mcpStatusOrder.filter(serverName => servers.has(serverName));
 	}
 
-	#orderedMcpStatusFailures(): Array<{ serverName: string; error: string }> {
+	#orderedMcpStatusFailures(): McpConnectionFailure[] {
 		return this.#mcpStatusOrder.flatMap(serverName => {
-			const error = this.#mcpFailedServers.get(serverName);
-			return error === undefined ? [] : [{ serverName, error }];
+			const failure = this.#mcpFailedServers.get(serverName);
+			return failure === undefined ? [] : [{ serverName, ...failure }];
 		});
 	}
 
@@ -1089,6 +1114,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
+			this.sessionManager.onPersistenceError(error => {
+				const detail = truncateToWidth(
+					replaceTabs(sanitizeText(error.message)).replace(/[\r\n]+/g, " "),
+					TRUNCATE_LENGTHS.LINE,
+				);
+				this.showWarning(
+					`Session persistence failed: ${detail}. Unsaved entries remain in memory; persistence will retry on the next entry.`,
+				);
+			}),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
@@ -1135,14 +1169,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
 		// is idempotent and self-guards against an already-active plan/goal mode; it
 		// does not check plan.enabled itself.
-		const hasConversationContext = this.sessionManager.buildSessionContext().messages.length > 0;
-		const hasExplicitMode = this.sessionManager.getEntries().some(entry => entry.type === "mode_change");
-		const isFreshSession = !hasConversationContext && !hasExplicitMode;
-		if (
-			isFreshSession &&
-			this.session.settings.get("plan.defaultOnStartup") &&
-			this.session.settings.get("plan.enabled")
-		) {
+		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
 		}
 
@@ -1165,6 +1192,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
+				if (event.type === "model_changed") {
+					this.#updateWelcomeModel();
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			onStatusLineSessionAccentChanged(() => {
@@ -1172,6 +1202,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 		);
+		// Resync the welcome banner to the live model: init-time reconciliations
+		// (#reconcileModeFromSession, #enterPlanMode for plan.defaultOnStartup)
+		// can change the model before this subscription exists, so the
+		// model_changed events they emit are never observed by the handler above.
+		this.#updateWelcomeModel();
 		this.#eventBusUnsubscribers.push(
 			onModelRolesChanged(() => {
 				void this.#reapplyPlanModeModelOnRoleChange();
@@ -3171,42 +3206,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	async #copyLocalArtifactsForFreshSession(sourceRoot: string, destinationRoot: string): Promise<void> {
-		if (sourceRoot === destinationRoot) return;
-
-		let sourceRootStat: { isDirectory(): boolean };
-		try {
-			sourceRootStat = await fs.lstat(sourceRoot);
-		} catch (error) {
-			if (isEnoent(error)) return;
-			throw error;
-		}
-
-		if (!sourceRootStat.isDirectory()) return;
-
-		await fs.mkdir(destinationRoot, { recursive: true });
-		await this.#copyLocalArtifactEntries(sourceRoot, destinationRoot);
-	}
-
-	async #copyLocalArtifactEntries(sourceDir: string, destinationDir: string): Promise<void> {
-		const entries = await fs.readdir(sourceDir, { withFileTypes: true });
-		for (const entry of entries) {
-			const sourcePath = path.join(sourceDir, entry.name);
-			const destinationPath = path.join(destinationDir, entry.name);
-
-			if (entry.isDirectory()) {
-				await fs.mkdir(destinationPath, { recursive: true });
-				await this.#copyLocalArtifactEntries(sourcePath, destinationPath);
-				continue;
-			}
-
-			if (entry.isFile()) {
-				await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-				await fs.copyFile(sourcePath, destinationPath);
-			}
-		}
-	}
-
 	async #approvePlan(
 		planContent: string,
 		options: {
@@ -3240,7 +3239,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const oldLocalRoot = this.#resolveLocalRoot();
 				await this.handleClearCommand();
 				const newLocalRoot = this.#resolveLocalRoot();
-				await this.#copyLocalArtifactsForFreshSession(oldLocalRoot, newLocalRoot);
+				await copyLocalArtifacts(oldLocalRoot, newLocalRoot);
 				const newLocalPath = resolveLocalUrlToPath(options.planFilePath, {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
@@ -3419,6 +3418,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		await this.#enterPlanMode();
 		if (!initialPrompt) return false;
+		if (isKnownSkillCommand(this, initialPrompt)) {
+			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
+				images: input?.images,
+				propagateErrors: true,
+			});
+			return true;
+		}
 		if (this.session.isStreaming) {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
@@ -3460,6 +3466,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		await this.#enterVibeMode();
 		if (!initialPrompt) return false;
+		if (isKnownSkillCommand(this, initialPrompt)) {
+			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
+				images: input?.images,
+				propagateErrors: true,
+			});
+			return true;
+		}
 		if (this.session.isStreaming) {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
@@ -3522,10 +3535,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.vibeModeEnabled) {
 			return;
 		}
-		const ownerScope = this.#vibeModeOwnerScope;
-		const killed = await VibeSessionRegistry.global().killAll(this.#vibeParentSession(), ownerScope);
-		await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
-		this.session.setVibeModeState(undefined);
+		// Tear down with the queued-message drain suppressed: aborting the active
+		// turn would otherwise let a queued user steer/follow-up restart on the
+		// still-live Vibe tools before this teardown removes them (issue #8326).
+		let killed = 0;
+		await this.session.runModeExitTeardown(async () => {
+			if (this.session.isStreaming) {
+				await this.session.abort();
+			}
+			killed = await VibeSessionRegistry.global().killAll(this.#vibeParentSession(), this.#vibeModeOwnerScope);
+			await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
+			this.session.setVibeModeState(undefined);
+		});
 		this.vibeModeEnabled = false;
 		this.#vibeModePreviousTools = undefined;
 		this.#vibeModeOwnerScope = undefined;
@@ -4265,7 +4286,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
 		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
@@ -4406,8 +4427,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	showWarning(message: string): void {
-		this.#uiHelpers.showWarning(message);
+	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void {
+		this.#uiHelpers.showWarning(message, options);
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
@@ -4441,6 +4462,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				fileTypes: server.fileTypes,
 			})) ?? []
 		);
+	}
+
+	#updateWelcomeModel(): void {
+		if (!this.#welcomeComponent) {
+			return;
+		}
+
+		this.#welcomeComponent.setModel(this.session.model?.name ?? "Unknown", this.session.model?.provider ?? "Unknown");
+		this.ui.requestRender();
 	}
 
 	#updateWelcomeLspServers(): void {
@@ -4617,8 +4647,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.renderSessionContext(sessionContext, options);
 	}
 
-	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): void {
-		this.#uiHelpers.renderInitialMessages(options);
+	/** Build a session context in bounded chunks so terminal input runs between event-loop turns. */
+	async renderSessionContextIncrementally(
+		sessionContext: SessionContext,
+		options: RenderSessionContextOptions,
+		renderChunk?: () => void,
+	): Promise<void> {
+		for (const message of sessionContext.messages) {
+			this.noteDisplayableThinkingContent(message);
+		}
+		await this.#uiHelpers.renderSessionContextIncrementally(sessionContext, options, renderChunk);
+	}
+
+	async renderInitialMessages(options?: {
+		preserveExistingChat?: boolean;
+		clearTerminalHistory?: boolean;
+	}): Promise<void> {
+		await this.#uiHelpers.renderInitialMessages(options);
 	}
 
 	getUserMessageText(message: Message): string {
@@ -5080,7 +5125,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.#btwController.dispose();
 			this.#omfgController.dispose();
-			this.renderInitialMessages({ clearTerminalHistory: true });
+			await this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(
 				result.sessionFile ? `Branched /btw to ${path.basename(result.sessionFile)}` : "Branched /btw",

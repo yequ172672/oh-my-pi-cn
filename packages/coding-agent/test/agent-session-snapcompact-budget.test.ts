@@ -18,34 +18,33 @@
  * result instead of falling back to the LLM summarizer.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { effectiveReserveTokens, estimateTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 describe("AgentSession snapcompact frame-budget sizing", () => {
-	let tempDir: TempDir;
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 
-	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-snapcompact-budget-");
-
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	});
+
+	beforeEach(() => {
+		sessionManager = SessionManager.inMemory();
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected bundled claude-sonnet-4-5 model");
@@ -104,13 +103,12 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 	});
 
 	afterEach(async () => {
-		try {
-			await session?.dispose();
-		} finally {
-			authStorage?.close();
-			await tempDir?.remove();
-			vi.restoreAllMocks();
-		}
+		await session?.dispose();
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	it("passes a maxFrames whose full projection (frames + text edges + base) fits the budget", async () => {
@@ -245,25 +243,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 	it("applies the frame byte cap when the model context window is unknown", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
-		await session.dispose();
-		// dispose() released the manager's in-memory transcript; reopen the
-		// persisted file for the replacement session, as revival paths do.
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
-		const unknownWindowModel = { ...model, contextWindow: 0 };
-		session = new AgentSession({
-			agent: new Agent({
-				initialState: { model: unknownWindowModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			}),
-			sessionManager,
-			settings: Settings.isolated({
-				"compaction.strategy": "snapcompact",
-				"compaction.autoContinue": false,
-				"compaction.keepRecentTokens": 4000,
-			}),
-			modelRegistry,
-		});
+		session.agent.setModel({ ...model, contextWindow: 0 });
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -282,5 +262,86 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		await session.compact(undefined, { mode: "snapcompact" });
 
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
+	});
+
+	it("keeps the frame archive out of the RPC result after persisting it", async () => {
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const archive = {
+			frames: [
+				{
+					data: "A".repeat(MAX_RPC_FRAME_BYTES),
+					mimeType: "image/png",
+					cols: 10,
+					rows: 10,
+					chars: 10,
+				},
+			],
+			totalChars: 10,
+			truncatedChars: 0,
+		};
+		vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				extensionState: "keep-me",
+				[snapcompact.PRESERVE_KEY]: archive,
+			},
+		});
+
+		const result = await session.compact(undefined, { mode: "snapcompact" });
+		const response = JSON.parse(
+			encodeRpcFrame({ id: "c1", type: "response", command: "compact", success: true, data: result }),
+		) as { success: boolean; error?: string };
+
+		expect(response).toMatchObject({ success: true });
+		expect(result.preserveData).toEqual({ extensionState: "keep-me" });
+		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
+		if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+		expect(compactionEntry.preserveData).toEqual({
+			extensionState: "keep-me",
+			[snapcompact.PRESERVE_KEY]: archive,
+		});
+	});
+
+	it("keeps the frame archive out of the auto_compaction_end event after persisting it", async () => {
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		// A zero-frame archive clears the payload/projection gates on the auto
+		// path while still carrying PRESERVE_KEY, so the strip is what removes it.
+		const archive = { frames: [], totalChars: 1000, truncatedChars: 0 };
+		vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				extensionState: "keep-me",
+				[snapcompact.PRESERVE_KEY]: archive,
+			},
+		});
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.runIdleCompaction();
+
+		const endEvent = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "auto_compaction_end" }> =>
+				event.type === "auto_compaction_end" && event.result !== undefined,
+		);
+		if (!endEvent?.result) throw new Error("Expected a result-carrying auto_compaction_end event");
+		expect(endEvent.result.preserveData).toEqual({ extensionState: "keep-me" });
+		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
+		if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+		expect(compactionEntry.preserveData).toEqual({
+			extensionState: "keep-me",
+			[snapcompact.PRESERVE_KEY]: archive,
+		});
 	});
 });

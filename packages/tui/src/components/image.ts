@@ -310,6 +310,16 @@ export class ImageBudget {
 	}
 
 	/**
+	 * End the physical-row coordinate epoch after observing its final commit
+	 * watermark. Placement ids and latched archive state survive, but attachment
+	 * rows do not: the next placement emit records them in the new-width frame.
+	 */
+	beginPlacementCoordinateEpoch(): void {
+		for (const state of this.#placementState.values()) state.lastAttachTopFrameRow = undefined;
+		this.#watchedPlacements.clear();
+	}
+
+	/**
 	 * Resolve the placement id and geometry for a direct-placement emit whose
 	 * topmost attached cell sits at `attachTopFrameRow` — the first frame row
 	 * the placement covers, i.e. the block's first *visible* row, not its

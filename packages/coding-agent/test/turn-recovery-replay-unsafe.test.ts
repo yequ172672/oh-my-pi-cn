@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -56,6 +57,7 @@ function createHost(
 		modelRegistry,
 		configWarnings: [],
 		model: () => model,
+		contextFitsModel: () => true,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
 		configuredThinkingLevel: () => undefined,
@@ -510,9 +512,125 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryFor(message, []).isRetryableError(message)).toBe(true);
 		});
 
+		it("retries a malformed function call whose tool call provably never executed", () => {
+			const message = makeMessage([toolCall("call-1")], model);
+			message.errorMessage = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+		});
+
+		it("does not retry a malformed function call whose tool call produced a real result", () => {
+			const message = makeMessage([toolCall("call-1")], model);
+			message.errorMessage = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+			expect(recoveryFor(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry a malformed function call that also committed visible text", () => {
+			const message = makeMessage([{ type: "text", text: "Let me fetch that page." }, toolCall("call-1")], model);
+			message.errorMessage = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
 		it("keeps a non-refusal error with an unexecuted tool call non-retriable", () => {
 			const message = makeMessage([toolCall("call-1")], model);
 			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+	});
+
+	describe("HTTP/2 stream reset after resolved tool calls", () => {
+		const nghttp2Internal = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
+		const nghttp2Refused = "Stream closed with error code NGHTTP2_REFUSED_STREAM";
+		const stallMessage = "Provider stream stalled while waiting for the next event";
+
+		function cursorMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.provider = "cursor";
+			message.errorMessage = errorMessage;
+			return message;
+		}
+
+		function execToolCall(id: string, marked = false): AssistantMessage["content"][number] {
+			const block: AssistantMessage["content"][number] = {
+				type: "toolCall",
+				id,
+				name: "bash",
+				arguments: { command: "pwd" },
+			};
+			if (marked) (block as { [kCursorExecResolved]?: true })[kCursorExecResolved] = true;
+			return block;
+		}
+
+		function mcpToolCall(id: string): AssistantMessage["content"][number] {
+			return {
+				type: "toolCall",
+				id,
+				name: "mcp__databricks_production_execute_sql",
+				arguments: { query: "SELECT 1" },
+			};
+		}
+
+		function realResult(toolCallId: string, toolName = "bash"): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				content: [{ type: "text", text: "/workspace" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		function recoveryForReset(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("continues a Cursor NGHTTP2_INTERNAL_ERROR after a marked exec result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
+			const recovery = recoveryForReset(message, [realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("continues a Cursor NGHTTP2_REFUSED_STREAM after a marked exec result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Refused);
+			expect(recoveryForReset(message, [realResult("call-1")]).classifyResolvedInterruptedToolTurn(message)).toBe(
+				"stream-stall",
+			);
+		});
+
+		it("continues a Cursor HTTP/2 reset after an unmarked MCP result", () => {
+			const message = cursorMessage([mcpToolCall("mcp-1")], nghttp2Internal);
+			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("does not continue a Cursor idle stall after an unmarked MCP call", () => {
+			const message = cursorMessage([mcpToolCall("mcp-1")], stallMessage);
+			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not continue an HTTP/2 reset whose tool call has no result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
+			expect(recoveryForReset(message, []).classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not continue an HTTP/2 CANCEL reset", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], "Stream closed with error code NGHTTP2_CANCEL");
+			expect(
+				recoveryForReset(message, [realResult("call-1")]).classifyResolvedInterruptedToolTurn(message),
+			).toBeUndefined();
+		});
+
+		it("matches a Connect-wrapped NGHTTP2 close", () => {
+			const message = cursorMessage(
+				[mcpToolCall("mcp-1")],
+				"Connect error failed_precondition: Error: Stream closed with error code NGHTTP2_INTERNAL_ERROR",
+			);
+			expect(
+				recoveryForReset(message, [
+					realResult("mcp-1", "mcp__databricks_production_execute_sql"),
+				]).classifyResolvedInterruptedToolTurn(message),
+			).toBe("stream-stall");
 		});
 	});
 });

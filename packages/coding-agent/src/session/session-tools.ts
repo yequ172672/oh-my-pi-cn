@@ -21,11 +21,11 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
+import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
-import { formatLocalCalendarDate } from "../utils/local-date";
 import {
 	extractPermissionLocations,
 	getPermissionIntent,
@@ -68,6 +68,8 @@ interface SessionToolsOptions {
 	toolRegistry?: Map<string, AgentTool>;
 	createVibeTools?: () => AgentTool[];
 	createComputerTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `think` scratchpad tool for runtime setting changes. */
+	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link SessionTools.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
@@ -79,7 +81,6 @@ interface SessionToolsOptions {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
-	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
@@ -184,6 +185,7 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createComputerTool: SessionToolsOptions["createComputerTool"];
+	#createThinkTool: SessionToolsOptions["createThinkTool"];
 	#createInspectImageTool: SessionToolsOptions["createInspectImageTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
@@ -225,7 +227,6 @@ export class SessionTools {
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
-	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
@@ -241,6 +242,7 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createComputerTool = options.createComputerTool;
+		this.#createThinkTool = options.createThinkTool;
 		this.#createInspectImageTool = options.createInspectImageTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
@@ -257,7 +259,6 @@ export class SessionTools {
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
-		this.#getLocalCalendarDate = options.getLocalCalendarDate ?? formatLocalCalendarDate;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
@@ -374,9 +375,23 @@ export class SessionTools {
 		return this.#toolRegistry.get(name);
 	}
 
-	/** Whether a registry entry came from a built-in factory. */
+	/**
+	 * Whether a registry entry came from a built-in factory.
+	 *
+	 * Resolves `customWireName` aliases too: a built-in tool may present on the
+	 * wire under a different name (e.g. `edit` exposes itself as `apply_patch` in
+	 * apply_patch mode), and tool cards render the call under that wire name. An
+	 * extension registering the literal alias name shadows it — the agent loop
+	 * routes exact-name matches ahead of wire aliases — so a registered non-built-in
+	 * tool with that name wins and the alias no longer counts as built-in.
+	 */
 	hasBuiltInTool(name: string): boolean {
-		return this.#builtInToolNames.has(name);
+		if (this.#builtInToolNames.has(name)) return true;
+		if (this.#toolRegistry.has(name)) return false;
+		for (const builtInName of this.#builtInToolNames) {
+			if (this.#toolRegistry.get(builtInName)?.customWireName === name) return true;
+		}
+		return false;
 	}
 
 	/** Updates source provenance when a live registry entry is replaced or restored. */
@@ -1158,6 +1173,48 @@ export class SessionTools {
 		});
 	}
 
+	/**
+	 * Session-scoped enable/disable for the private `think` scratchpad tool.
+	 *
+	 * Enabling constructs the tool once and refreshes the model's tool contract;
+	 * disabling removes it from the active set while preserving its registry entry.
+	 *
+	 * @returns false when enabling was requested but this session cannot build the tool.
+	 */
+	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#setThinkToolActive(enabled && supportsExternalThinking(this.#host.model()));
+	}
+
+	/** Reconciles the external scratchpad after the active model changes. */
+	reconcileThinkTool(): Promise<boolean> {
+		return this.#setThinkToolActive(
+			this.#host.settings.get("externalThinking") && supportsExternalThinking(this.#host.model()),
+		);
+	}
+
+	#setThinkToolActive(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const active = this.getEnabledToolNames();
+			if (!enabled) {
+				if (active.includes("think")) {
+					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
+				}
+				return true;
+			}
+			if (!this.#toolRegistry.has("think")) {
+				const tool = await this.#createThinkTool?.();
+				if (tool?.name !== "think") return false;
+				const wrapped = this.#wrapRuntimeTool(tool);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			if (!active.includes("think")) {
+				await this.#applyActiveToolsByName([...active, "think"]);
+			}
+			return true;
+		});
+	}
+
 	/** Current effective inspect_image state for `/vision status`. */
 	inspectImageState(): { mode: InspectImageMode; active: boolean; model: string | undefined } {
 		const model = this.#host.model();
@@ -1373,10 +1430,10 @@ export class SessionTools {
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
 	 *
-	 * The current calendar date IS covered (appended as a segment) because
-	 * `buildSystemPrompt` injects it into the prompt body (`Today is '{{date}}'`).
-	 * Without this, a session spanning midnight with only tool-stable MCP
-	 * reconnects would keep yesterday's date indefinitely.
+	 * The calendar date is deliberately NOT part of the signature: the date/cwd
+	 * reminder rides on the first user turn at request time (`date-cwd-reminder`),
+	 * so a session spanning midnight must NOT rebuild a prompt that no longer
+	 * embeds the date — the reminder picks up the new day on its own.
 	 */
 	#computeAppliedToolSignature(toolNames: string[], tools: AgentTool[]): string {
 		// Order-preserving join: any reorder must produce a different signature so
@@ -1410,8 +1467,7 @@ export class SessionTools {
 		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
 		// exception above, bounded to the exact projection rendered in the global
 		// route guidance so churn wholly behind its fallback does not rebuild.
-		const date = this.#getLocalCalendarDate();
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}|${date}`;
+		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}`;
 	}
 
 	/**

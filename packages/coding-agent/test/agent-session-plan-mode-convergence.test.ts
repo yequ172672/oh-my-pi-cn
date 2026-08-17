@@ -10,7 +10,7 @@
  *      terminal settle, bounded by PLAN_MODE_REMINDER_MAX (then yields to the
  *      user), and either decision tool resets the counter.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -23,7 +23,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import planModeReminderPrompt from "../src/prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 
 /** A stable, literal (non-templated) line of the reminder prompt, so the test
@@ -77,7 +77,21 @@ interface PlanHarness {
 describe("AgentSession plan-mode convergence", () => {
 	let tempDir: TempDir;
 	let session: AgentSession | undefined;
-	const authStorages: AuthStorage[] = [];
+	let authDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		authDir = TempDir.createSync("@pi-plan-converge-auth-");
+		authStorage = await AuthStorage.create(authDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, authDir.join("models.yml"));
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		authDir.removeSync();
+	});
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-plan-converge-");
@@ -88,7 +102,6 @@ describe("AgentSession plan-mode convergence", () => {
 			await session?.dispose();
 		} finally {
 			session = undefined;
-			for (const authStorage of authStorages.splice(0)) authStorage.close();
 			await tempDir?.remove();
 		}
 	});
@@ -122,11 +135,6 @@ describe("AgentSession plan-mode convergence", () => {
 			},
 			streamFn: mock.stream,
 		});
-
-		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join(`models-${Snowflake.next()}.yml`));
 
 		let advisorMock: MockModel | undefined;
 		let advisorStreamFn: StreamFn | undefined;

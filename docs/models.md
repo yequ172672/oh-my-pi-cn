@@ -61,6 +61,7 @@ providers:
         api: openai-completions
         reasoning: false
         input: [text]
+        imageInputDecoder: stb # local STB decoder; OMP converts WebP before dispatch
         cost:
           input: 0
           output: 0
@@ -101,6 +102,7 @@ providers:
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
+- `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 
 ## Validation rules (current)
 
@@ -190,7 +192,7 @@ Provider defaults vs per-model overrides:
 
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
-- `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`,
+- `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `imageInputDecoder`,
   `supportsTools`, `cost`, `premiumMultiplier`, `contextWindow`, `maxTokens`,
   `omitMaxOutputTokens`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
   `remoteCompaction`).

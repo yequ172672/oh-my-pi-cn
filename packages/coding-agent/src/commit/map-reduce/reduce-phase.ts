@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
+import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import reduceSystemPrompt from "../../commit/prompts/reduce-system.md" with { type: "text" };
 import reduceUserPrompt from "../../commit/prompts/reduce-user.md" with { type: "text" };
@@ -35,15 +35,21 @@ export async function runReducePhase({
 		stat,
 		scope_candidates: scopeCandidates,
 	});
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [prompt.render(reduceSystemPrompt)],
-			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-			tools: [ReduceTool],
-		},
-		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
+	const response = await retryTransientCompletion(() =>
+		completeSimple(
+			model,
+			{
+				systemPrompt: [prompt.render(reduceSystemPrompt)],
+				messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
+				tools: [ReduceTool],
+			},
+			{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
+		),
 	);
+
+	if (response.stopReason === "error") {
+		throw new Error(response.errorMessage ?? "provider error");
+	}
 
 	return parseConventionalAnalysisResponse(response, ReduceTool);
 }

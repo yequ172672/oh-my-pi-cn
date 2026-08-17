@@ -29,7 +29,7 @@ describe("generate_image tool gating", () => {
 		registryDir = path.join(os.tmpdir(), `pi-generate-image-gating-${Snowflake.next()}`);
 		fs.mkdirSync(registryDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(registryDir, "auth.db"));
-		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage, path.join(registryDir, "models.yml"));
 	});
 
 	afterEach(async () => {
@@ -41,8 +41,30 @@ describe("generate_image tool gating", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
+	function startupShortcuts() {
+		// These tests vary only tool registration and activation. Bypass unrelated
+		// filesystem discovery and workspace walking on every SDK session startup.
+		return {
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			workspaceTree: {
+				rootPath: registryDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
+		};
+	}
+
 	async function activeToolNames(settings: Settings, toolNames?: string[]): Promise<string[]> {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -69,6 +91,7 @@ describe("generate_image tool gating", () => {
 
 	async function sessionWithCustomTools(toolNames: string[], customTools: CustomTool[]): Promise<AgentSession> {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			enableMCP: false,
@@ -116,6 +139,7 @@ describe("generate_image tool gating", () => {
 		// discoverable custom tool, so it mounts as an xd:// device instead of
 		// shipping its schema top-level.
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -157,6 +181,7 @@ describe("generate_image tool gating", () => {
 			},
 		} as CustomTool;
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -315,6 +340,7 @@ describe("generate_image tool gating", () => {
 	});
 	it("exposes newly discovered RPC tools directly when write was omitted", async () => {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,

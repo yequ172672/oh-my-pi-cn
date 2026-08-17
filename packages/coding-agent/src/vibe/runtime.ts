@@ -421,11 +421,17 @@ export class VibeSessionRegistry {
 	}
 
 	/**
-	 * Insert a bare worker record without the spawn/job machinery. Test-only —
-	 * lets {@link aggregateVibeWorkerTokensPerSecond} be exercised against a
-	 * fake roster + AgentRegistry session without driving a real turn.
+	 * Insert a bare worker record without the spawn machinery. Test-only —
+	 * lets focused runtime tests attach an optional synthetic in-flight job.
 	 */
-	registerRecordForTests(record: { id: string; cli?: VibeCli; ownerId: string; state?: VibeSessionState }): void {
+	registerRecordForTests(record: {
+		id: string;
+		cli?: VibeCli;
+		ownerId: string;
+		state?: VibeSessionState;
+		jobId?: string;
+	}): void {
+		const now = Date.now();
 		this.#records.set(record.id, {
 			id: record.id,
 			cli: record.cli ?? "fast",
@@ -434,8 +440,11 @@ export class VibeSessionRegistry {
 			parentSessionFile: null,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
-			createdAt: Date.now(),
-			lastActivityAt: Date.now(),
+			createdAt: now,
+			lastActivityAt: now,
+			turn: record.jobId
+				? { jobId: record.jobId, message: "test turn", startedAt: now, trace: [], toolCount: 0 }
+				: undefined,
 			queue: [],
 			turnCount: 0,
 			killed: false,
@@ -1113,25 +1122,31 @@ export class VibeSessionRegistry {
 			if (job?.status === "running") runningJobs.push(job);
 		}
 
-		let waited = false;
+		let waitEndedByTimeout = false;
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
-			waited = true;
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
-			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-			const timeoutHandle = setTimeout(() => timeoutResolve(), timeoutMs);
-			const racePromises: Promise<unknown>[] = [...runningJobs.map(job => job.promise), timeoutPromise];
+			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
+			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
+				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
+				timeoutPromise,
+			];
 			let abortCleanup: (() => void) | undefined;
 			if (args.signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				args.signal.addEventListener("abort", onAbort, { once: true });
-				abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
+				const onAbort = () => abortResolve("aborted");
+				if (args.signal.aborted) {
+					onAbort();
+				} else {
+					args.signal.addEventListener("abort", onAbort, { once: true });
+					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				}
 				racePromises.push(abortPromise);
 			}
 			try {
-				await Promise.race(racePromises);
+				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
@@ -1144,7 +1159,7 @@ export class VibeSessionRegistry {
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
-		return { settled, stillRunning, timedOut: waited && settled.length === 0 };
+		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */

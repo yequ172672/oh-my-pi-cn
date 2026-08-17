@@ -10,6 +10,7 @@ const EMPTY_AWS_ENV = {
 	AWS_ACCESS_KEY_ID: undefined,
 	AWS_SECRET_ACCESS_KEY: undefined,
 	AWS_BEARER_TOKEN_BEDROCK: undefined,
+	AWS_BEDROCK_SKIP_AUTH: undefined,
 	AWS_PROFILE: undefined,
 	AWS_SDK_LOAD_CONFIG: undefined,
 	AWS_WEB_IDENTITY_TOKEN_FILE: undefined,
@@ -21,6 +22,22 @@ const EMPTY_AWS_ENV = {
 };
 
 describe("AWS provider availability", () => {
+	test("recognizes the Bedrock auth bypass without AWS credentials", async () => {
+		await withEnv(
+			{
+				...EMPTY_AWS_ENV,
+				AWS_BEDROCK_SKIP_AUTH: "1",
+				AWS_SHARED_CREDENTIALS_FILE: "/missing/aws-credentials",
+				AWS_CONFIG_FILE: "/missing/aws-config",
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			async () => {
+				expect(getEnvApiKey("amazon-bedrock")).toBeDefined();
+				expect(getEnvApiKey("bedrock-mantle")).toBeUndefined();
+			},
+		);
+	});
+
 	test("recognizes the default shared credentials file", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-"));
 		try {

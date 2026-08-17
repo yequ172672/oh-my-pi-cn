@@ -12,6 +12,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { $env, $which, APP_NAME, compareVersions, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import {
 	FORK_PACKAGE as DISTRIBUTION_PACKAGE,
@@ -28,6 +29,7 @@ import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 export const FORK_REPOSITORY = DISTRIBUTION_REPOSITORY;
 export const FORK_PACKAGE = DISTRIBUTION_PACKAGE;
 export const FORK_MISE_TOOL = `github:${FORK_REPOSITORY}[version_prefix=omp-cn-v]`;
+const NIX_STORE_DIR = "/nix/store";
 /**
  * The fork does not ship a Homebrew tap yet. Keep the target on the fork so
  * an eventual tap can be added without routing updates back to upstream.
@@ -84,6 +86,20 @@ function currentNativeTag(): string {
 /** Distribution channel advertised by a release's published npm manifest. */
 export type ReleaseDist = "npm" | "binary";
 
+/** npm package names a release installs: the agent package and its natives companion. */
+export interface ReleasePackages {
+	pkg: string;
+	natives: string;
+}
+
+/** Parsed `omp.rename` pointer: the new agent package name and optional new natives name. */
+export interface ReleaseRename {
+	pkg: string;
+	natives?: string;
+}
+
+const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
+
 export interface ReleaseInfo {
 	schemaVersion: 0 | 1;
 	tag: string;
@@ -93,6 +109,8 @@ export interface ReleaseInfo {
 	upstreamCommit: string | null;
 	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
 	dist?: ReleaseDist;
+	/** npm names to install, resolved after following any `omp.rename` pointers. */
+	packages: ReleasePackages;
 }
 
 export interface ReleaseBinaryAsset {
@@ -122,6 +140,34 @@ export function resolveReleaseDist(manifest: unknown): ReleaseDist | undefined {
 	const dist = manifest.omp.dist;
 	if (dist === undefined) return undefined;
 	return dist === "npm" ? "npm" : "binary";
+}
+
+/**
+ * Parse the `omp.rename` pointer from a published package manifest.
+ *
+ * Forward-compatibility contract for renaming the npm package: the final
+ * version published under an old name is a stub whose manifest carries
+ * `"omp": { "rename": { "package": "<new-agent-pkg>", "natives": "<new-natives-pkg>" }, "dist": "binary" }`.
+ * Updaters that understand `rename` follow the pointer and resolve the
+ * release from the renamed package instead ({@link getLatestRelease});
+ * older deployed updaters ignore it and take the `dist: "binary"` escape
+ * hatch, replacing the install with the GitHub release binary rather than
+ * installing the stub via bun/npm.
+ *
+ * The renamed package's own manifest MUST declare `"dist": "npm"` (so
+ * package-manager installs stay package-managed across a major bump) and
+ * MUST continue the old version line (a version reset would compare as
+ * "already up to date" against the running build).
+ */
+export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
+	if (!isRecord(manifest) || !isRecord(manifest.omp)) return undefined;
+	const rename = manifest.omp.rename;
+	if (!isRecord(rename) || typeof rename.package !== "string" || rename.package.length === 0) return undefined;
+	const natives = rename.natives;
+	return {
+		pkg: rename.package,
+		natives: typeof natives === "string" && natives.length > 0 ? natives : undefined,
+	};
 }
 
 function majorVersion(version: string): number {
@@ -443,7 +489,31 @@ function isPathInDirectory(filePath: string, directoryPath: string): boolean {
 	return isPathInDirectoryLexical(resolvedFile, dirReal);
 }
 
-type UpdateMethod = "brew" | "mise" | "bun" | "npm" | "binary";
+function isPathInManagerRoot(linkTarget: string, nodeModulesDir: string): boolean {
+	if (isPathInDirectoryLexical(linkTarget, nodeModulesDir)) return true;
+	// Resolve only the manager root. Resolving the link target itself would
+	// follow globally linked packages into their checkout and lose ownership.
+	const nodeModulesReal = tryRealpath(path.resolve(nodeModulesDir));
+	return nodeModulesReal !== undefined && isPathInDirectoryLexical(linkTarget, nodeModulesReal);
+}
+
+function resolveNpmGlobalNodeModulesDir(
+	globalBinDir: string | undefined,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
+	if (!globalBinDir) return undefined;
+	if (platform === "win32") return path.join(globalBinDir, "node_modules");
+	return path.join(path.dirname(globalBinDir), "lib", "node_modules");
+}
+
+function isManagerOwnedBinEntry(linkTarget: string | undefined, nodeModulesDir: string | undefined): boolean {
+	// Non-symlink launchers and unreadable links retain the existing bin-dir
+	// classification. A readable link must point through the manager's exact
+	// global node_modules tree.
+	return linkTarget === undefined || (nodeModulesDir !== undefined && isPathInManagerRoot(linkTarget, nodeModulesDir));
+}
+
+type UpdateMethod = "brew" | "mise" | "nix" | "bun" | "npm" | "binary";
 
 interface UpdateMethodResolutionOptions {
 	homebrewPrefix?: string;
@@ -452,6 +522,8 @@ interface UpdateMethodResolutionOptions {
 	npmBinDir?: string;
 	/** Platform override for deterministic cross-platform policy tests. */
 	platform?: NodeJS.Platform;
+	/** Bun's configured global package directory, independent of its bin directory. */
+	bunGlobalDir?: string;
 	/**
 	 * Whether the resolved omp path is a plain file (the standalone binary)
 	 * rather than a package-manager symlink. Stops a binary install from being
@@ -459,11 +531,17 @@ interface UpdateMethodResolutionOptions {
 	 * target directory.
 	 */
 	ompIsRegularFile?: boolean;
+	/**
+	 * Absolute path named by the bin entry's first symlink hop. This deliberately
+	 * preserves a global package symlink instead of resolving into its checkout.
+	 */
+	ompLinkTarget?: string;
 }
 
 type UpdateTarget =
 	| { method: "brew" }
 	| { method: "mise" }
+	| { method: "nix" }
 	| { method: "bun"; path?: string }
 	| { method: "npm"; path?: string }
 	| { method: "binary"; path: string; replacesSymlink: boolean };
@@ -474,16 +552,19 @@ function resolveUpdateMethod(
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
 	const {
+		bunGlobalDir,
 		homebrewPrefix,
 		miseBinDirs = [],
 		miseDataDir,
 		npmBinDir,
 		ompIsRegularFile = false,
 		platform = process.platform,
+		ompLinkTarget,
 	} = options;
 	const launcherExtension = path.extname(ompPath).toLowerCase();
 	const isWindowsScriptLauncher =
 		launcherExtension === ".cmd" || launcherExtension === ".ps1" || launcherExtension === ".bat";
+	if (isPathInDirectory(ompPath, NIX_STORE_DIR)) return "nix";
 	if (homebrewPrefix && isPathInDirectory(ompPath, path.join(homebrewPrefix, "bin"))) return "brew";
 	if (miseBinDirs.some(dir => isPathInDirectory(ompPath, dir))) return "mise";
 	if (miseDataDir && isPathInDirectory(ompPath, path.join(miseDataDir, "shims"))) return "mise";
@@ -497,9 +578,28 @@ function resolveUpdateMethod(
 	// (bun's .exe launcher, npm's .cmd/.ps1), so a regular file is NOT evidence
 	// of a standalone install and the override would hijack managed installs.
 	const isStandaloneRegularFile = ompIsRegularFile && platform !== "win32";
-	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir) && !isStandaloneRegularFile) return "bun";
-	if ((npmBinDir && isPathInDirectory(ompPath, npmBinDir) && !isStandaloneRegularFile) || isWindowsScriptLauncher)
+	const bunNodeModulesDir = resolveBunGlobalNodeModulesDirFromLocations({
+		globalDir: bunGlobalDir,
+		globalBinDir: bunBinDir,
+	});
+	if (
+		bunBinDir &&
+		isPathInDirectory(ompPath, bunBinDir) &&
+		!isStandaloneRegularFile &&
+		isManagerOwnedBinEntry(ompLinkTarget, bunNodeModulesDir)
+	) {
+		return "bun";
+	}
+	const npmNodeModulesDir = resolveNpmGlobalNodeModulesDir(npmBinDir, platform);
+	if (
+		npmBinDir &&
+		isPathInDirectory(ompPath, npmBinDir) &&
+		!isStandaloneRegularFile &&
+		isManagerOwnedBinEntry(ompLinkTarget, npmNodeModulesDir)
+	) {
 		return "npm";
+	}
+	if (isWindowsScriptLauncher) return "npm";
 	return "binary";
 }
 
@@ -509,6 +609,44 @@ export function resolveUpdateMethodForTest(
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
 	return resolveUpdateMethod(ompPath, bunBinDir, options);
+}
+
+/** Resolve an update target from the concrete PATH entry selected by the shell. */
+export function resolveUpdateTargetFromPath(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions & { allowPackageManagers: boolean },
+): UpdateTarget {
+	let ompIsRegularFile = false;
+	let ompIsSymlink = false;
+	let ompLinkTarget: string | undefined;
+	let ompRealpath: string | undefined;
+	try {
+		const stat = fs.lstatSync(ompPath);
+		ompIsRegularFile = stat.isFile() && !stat.isSymbolicLink();
+		ompIsSymlink = stat.isSymbolicLink();
+		if (ompIsSymlink) {
+			const rawTarget = fs.readlinkSync(ompPath);
+			const linkDir = path.dirname(ompPath);
+			ompLinkTarget = path.resolve(tryRealpath(linkDir) ?? linkDir, rawTarget);
+			ompRealpath = tryRealpath(ompPath);
+		}
+	} catch {}
+
+	const method = resolveUpdateMethod(ompPath, bunBinDir, {
+		...options,
+		ompIsRegularFile,
+		ompLinkTarget,
+	});
+	if (method === "binary") {
+		// A package-manager-enabled update follows a foreign alias to replace
+		// its standalone binary. Binary-only releases intentionally replace the
+		// selected manager launcher in place.
+		const binaryPath = options.allowPackageManagers && ompIsSymlink ? (ompRealpath ?? ompPath) : ompPath;
+		return { method, path: binaryPath, replacesSymlink: ompIsSymlink && binaryPath === ompPath };
+	}
+	if (method === "bun" || method === "npm") return { method, path: ompPath };
+	return { method };
 }
 /**
  * Resolve how the running install should be updated.
@@ -529,27 +667,14 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 	const ompPath = resolveOmpPath();
 
 	if (ompPath) {
-		// Package-manager installs symlink the bin entry into node_modules; the
-		// standalone installer writes a plain executable. When the global bin dir
-		// overlaps the installer's default (~/.local/bin), that file type — not
-		// directory containment — distinguishes a binary install from npm/bun.
-		let ompIsRegularFile = false;
-		let ompIsSymlink = false;
-		try {
-			const stat = fs.lstatSync(ompPath);
-			ompIsRegularFile = stat.isFile() && !stat.isSymbolicLink();
-			ompIsSymlink = stat.isSymbolicLink();
-		} catch {}
-		const method = resolveUpdateMethod(ompPath, bunBinDir, {
+		return resolveUpdateTargetFromPath(ompPath, bunBinDir, {
+			allowPackageManagers: options.allowPackageManagers,
+			bunGlobalDir: options.allowPackageManagers ? process.env.BUN_INSTALL_GLOBAL_DIR : undefined,
 			homebrewPrefix,
 			miseBinDirs,
 			miseDataDir,
 			npmBinDir,
-			ompIsRegularFile,
 		});
-		if (method === "binary") return { method, path: ompPath, replacesSymlink: ompIsSymlink };
-		if (method === "bun" || method === "npm") return { method, path: ompPath };
-		return { method };
 	}
 
 	if (bunBinDir) return { method: "bun" };
@@ -561,7 +686,7 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
  * Get the latest release info from the npm registry.
  * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
  */
-export function resolveRegistryRelease(value: unknown): ReleaseInfo {
+export function resolveRegistryRelease(value: unknown, packages: ReleasePackages = CURRENT_PACKAGES): ReleaseInfo {
 	if (!isRecord(value) || !isValidReleaseVersion(value.version)) {
 		throw new Error("Invalid npm release metadata: version must be a valid SemVer version");
 	}
@@ -575,6 +700,7 @@ export function resolveRegistryRelease(value: unknown): ReleaseInfo {
 			nativeVersion: value.version,
 			upstreamCommit: null,
 			dist: resolveReleaseDist(value),
+			packages,
 		};
 	}
 
@@ -593,26 +719,63 @@ export function resolveRegistryRelease(value: unknown): ReleaseInfo {
 		nativeVersion: distribution.nativeVersion,
 		upstreamCommit: distribution.upstreamCommit,
 		dist: resolveReleaseDist(value),
+		packages,
 	};
 }
 
-export async function getLatestRelease(): Promise<ReleaseInfo> {
+/** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
+const MAX_RENAME_HOPS = 3;
+
+async function fetchLatestManifest(
+	pkg: string,
+	timeoutMs: number,
+): Promise<{ version: string; manifest: Record<string, unknown> }> {
 	let response: Response;
 	try {
-		response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`, {
-			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+		response = await fetch(`${NPM_REGISTRY}${pkg}/latest`, {
+			signal: withTimeoutSignal(timeoutMs),
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {
-			throw new Error("Timed out fetching release info after 30s", { cause: err });
+			throw new Error(`Timed out fetching release info for ${pkg} after ${Math.round(timeoutMs / 1000)}s`, {
+				cause: err,
+			});
 		}
 		throw err;
 	}
 	if (!response.ok) {
-		throw new Error(`Failed to fetch release info: ${response.statusText}`);
+		throw new Error(`Failed to fetch release info for ${pkg}: ${response.statusText}`);
 	}
 
-	return resolveRegistryRelease(await response.json());
+	const data: unknown = await response.json();
+	if (!isRecord(data) || typeof data.version !== "string") {
+		throw new Error(`Malformed npm registry response for ${pkg}: missing version`);
+	}
+	return { version: data.version, manifest: data };
+}
+
+/**
+ * Get the latest release info from the npm registry, following `omp.rename`
+ * pointers ({@link resolveReleaseRename}) when the package has moved to a new
+ * npm name. Version, dist, and install names all come from the final manifest
+ * in the chain. Uses npm instead of GitHub API to avoid unauthenticated rate
+ * limiting.
+ */
+export async function getLatestRelease(options: { timeoutMs?: number } = {}): Promise<ReleaseInfo> {
+	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
+	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
+	const visited = new Set([packages.pkg]);
+	let latest = await fetchLatestManifest(packages.pkg, timeoutMs);
+	for (let hop = 0; hop < MAX_RENAME_HOPS; hop++) {
+		const rename = resolveReleaseRename(latest.manifest);
+		if (!rename || visited.has(rename.pkg)) break;
+		visited.add(rename.pkg);
+		packages.pkg = rename.pkg;
+		if (rename.natives) packages.natives = rename.natives;
+		latest = await fetchLatestManifest(packages.pkg, timeoutMs);
+	}
+
+	return resolveRegistryRelease(latest.manifest, packages);
 }
 
 interface BunInstallCachePruneResult {
@@ -776,10 +939,19 @@ async function resolveBunInstallCacheDir(): Promise<string | undefined> {
 	}
 }
 
-export function resolveBunGlobalNodeModulesDirFromLocations(
-	globalBinDir: string | undefined,
-	cacheDir: string | undefined,
-): string | undefined {
+interface BunGlobalInstallLocations {
+	globalDir?: string;
+	globalBinDir?: string;
+	cacheDir?: string;
+}
+
+/** Resolve Bun's global node_modules root from explicit, default, or cache locations. */
+export function resolveBunGlobalNodeModulesDirFromLocations({
+	globalDir,
+	globalBinDir,
+	cacheDir,
+}: BunGlobalInstallLocations): string | undefined {
+	if (globalDir && globalDir.length > 0) return path.join(globalDir, "node_modules");
 	if (globalBinDir && globalBinDir.length > 0) {
 		return path.join(path.dirname(globalBinDir), "install", "global", "node_modules");
 	}
@@ -793,9 +965,16 @@ async function resolveBunGlobalNodeModulesDir(cacheDir: string): Promise<string 
 	try {
 		const result = await $`bun pm bin -g`.quiet().nothrow();
 		const globalBinDir = result.exitCode === 0 ? result.text().trim() : undefined;
-		return resolveBunGlobalNodeModulesDirFromLocations(globalBinDir, cacheDir);
+		return resolveBunGlobalNodeModulesDirFromLocations({
+			globalDir: process.env.BUN_INSTALL_GLOBAL_DIR,
+			globalBinDir,
+			cacheDir,
+		});
 	} catch {
-		return resolveBunGlobalNodeModulesDirFromLocations(undefined, cacheDir);
+		return resolveBunGlobalNodeModulesDirFromLocations({
+			globalDir: process.env.BUN_INSTALL_GLOBAL_DIR,
+			cacheDir,
+		});
 	}
 }
 
@@ -969,8 +1148,8 @@ async function unlinkIfExists(filePath: string): Promise<void> {
  * running process image, so unlinking it fails with EPERM/EACCES until this
  * process exits (issue #845). The replacement and verification already
  * succeeded by the time we get here, so every error is swallowed; the leftover
- * is reclaimed by {@link sweepStaleBackups} on the next update once it is no
- * longer in use. Returns whether the file is gone.
+ * is reclaimed by {@link sweepStaleUpdateArtifacts} on the next update once it
+ * is no longer in use. Returns whether the file is gone.
  */
 async function removeBackupBestEffort(filePath: string): Promise<boolean> {
 	try {
@@ -982,16 +1161,21 @@ async function removeBackupBestEffort(filePath: string): Promise<boolean> {
 }
 
 /**
- * Best-effort removal of binary-update backups left by earlier runs.
+ * Best-effort removal of binary-update leftovers from earlier runs.
  *
- * Each self-update moves the previous executable to `<binary>.<timestamp>.<pid>.bak`
- * before swapping the new one in. On Windows that backup cannot be deleted
- * while the updating process is alive, so it is left for a later run to reclaim
- * once its owning process has exited. Also matches the legacy fixed
- * `<binary>.bak` name produced before backups were timestamped, so users
- * upgrading from a buggy release get the orphaned file cleaned up.
+ * Each self-update writes to `<binary>.<timestamp>.<pid>.new` and moves the
+ * previous executable to `<binary>.<timestamp>.<pid>.bak` before swapping the
+ * new one in. On Windows a backup cannot be deleted while the updating process
+ * is alive (it is the running process image), so it is left for a later run to
+ * reclaim once its owning process has exited. A `.new` temp file only survives
+ * a hard kill mid-download; it is reaped once older than the download window,
+ * which a live download cannot exceed without timing out and cleaning up after
+ * itself — so a concurrent run's in-progress temp is never deleted. Legacy
+ * fixed `<binary>.bak` / `<binary>.new` names (from before suffixes were made
+ * unique) are matched too, so users upgrading from a buggy release get the
+ * orphaned files cleaned up.
  */
-export async function sweepStaleBackups(targetPath: string): Promise<void> {
+export async function sweepStaleUpdateArtifacts(targetPath: string): Promise<void> {
 	const dir = path.dirname(targetPath);
 	const base = path.basename(targetPath);
 	let entries: string[];
@@ -1000,13 +1184,28 @@ export async function sweepStaleBackups(targetPath: string): Promise<void> {
 	} catch {
 		return;
 	}
+	const now = Date.now();
 	for (const entry of entries) {
-		if (!entry.startsWith(`${base}.`) || !entry.endsWith(".bak")) continue;
-		// Legacy "<base>.bak" → empty middle; new "<base>.<timestamp>.<pid>.bak"
-		// → dot-separated numeric run. Anything else is an unrelated *.bak file.
-		const middle = entry.slice(base.length + 1, entry.length - ".bak".length);
+		if (!entry.startsWith(`${base}.`)) continue;
+		const suffix = entry.endsWith(".bak") ? ".bak" : entry.endsWith(".new") ? ".new" : undefined;
+		if (!suffix) continue;
+		// Legacy "<base><suffix>" → empty middle; new "<base>.<timestamp>.<pid><suffix>"
+		// → dot-separated numeric run. Anything else is an unrelated file.
+		const middle = entry.slice(base.length + 1, entry.length - suffix.length);
 		if (middle.length > 0 && !/^\d+(\.\d+)*$/.test(middle)) continue;
-		await removeBackupBestEffort(path.join(dir, entry));
+		const full = path.join(dir, entry);
+		if (suffix === ".new") {
+			// A temp file may belong to a concurrent update still downloading, so
+			// only reap ones older than the download window.
+			let mtimeMs: number;
+			try {
+				mtimeMs = (await fs.promises.stat(full)).mtimeMs;
+			} catch {
+				continue;
+			}
+			if (now - mtimeMs < BINARY_DOWNLOAD_TIMEOUT_MS) continue;
+		}
+		await removeBackupBestEffort(full);
 	}
 }
 
@@ -1047,10 +1246,15 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 	}
 }
 
-function buildVersionedPackageInstallArgs(packageVersion: string, nativeVersion: string, nativeTag: string): string[] {
-	const args = [`${PACKAGE}@${packageVersion}`, `${NATIVES_PACKAGE}@${nativeVersion}`];
+function buildVersionedPackageInstallArgs(
+	packageVersion: string,
+	nativeVersion: string,
+	nativeTag: string,
+	packages: ReleasePackages,
+): string[] {
+	const args = [`${packages.pkg}@${packageVersion}`, `${packages.natives}@${nativeVersion}`];
 	if (SUPPORTED_NATIVE_TAGS.has(nativeTag)) {
-		args.push(`${NATIVES_PACKAGE}-${nativeTag}@${nativeVersion}`);
+		args.push(`${packages.natives}-${nativeTag}@${nativeVersion}`);
 	}
 	return args;
 }
@@ -1091,38 +1295,59 @@ type PackageReleaseVersions = Pick<ReleaseInfo, "version" | "nativeVersion">;
 export function buildBunInstallArgsForRelease(
 	release: PackageReleaseVersions,
 	nativeTag: string = currentNativeTag(),
+	packages: ReleasePackages = CURRENT_PACKAGES,
 ): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
 		`--registry=${NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag),
+		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag, packages),
 	];
 }
 
 /** Legacy same-version interface retained for external callers. */
-export function buildBunInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
-	return buildBunInstallArgsForRelease({ version: expectedVersion, nativeVersion: expectedVersion }, nativeTag);
+export function buildBunInstallArgs(
+	expectedVersion: string,
+	nativeTag: string = currentNativeTag(),
+	packages: ReleasePackages = CURRENT_PACKAGES,
+): string[] {
+	return buildBunInstallArgsForRelease(
+		{ version: expectedVersion, nativeVersion: expectedVersion },
+		nativeTag,
+		packages,
+	);
 }
 
 /** Build the npm argv used to update npm-managed global installs. */
 export function buildNpmInstallArgsForRelease(
 	release: PackageReleaseVersions,
 	nativeTag: string = currentNativeTag(),
+	packages: ReleasePackages = CURRENT_PACKAGES,
+	flags: { force?: boolean } = {},
 ): string[] {
-	const args = [
+	return [
 		"install",
 		"-g",
+		...(flags.force ? ["--force"] : []),
 		`--registry=${NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag),
+		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag, packages),
 	];
-	return args;
 }
 
 /** Legacy same-version interface retained for external callers. */
-export function buildNpmInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
-	return buildNpmInstallArgsForRelease({ version: expectedVersion, nativeVersion: expectedVersion }, nativeTag);
+export function buildNpmInstallArgs(
+	expectedVersion: string,
+	nativeTag: string = currentNativeTag(),
+	packages: ReleasePackages = CURRENT_PACKAGES,
+	flags: { force?: boolean } = {},
+): string[] {
+	return buildNpmInstallArgsForRelease(
+		{ version: expectedVersion, nativeVersion: expectedVersion },
+		nativeTag,
+		packages,
+		flags,
+	);
 }
 
 export function buildHomebrewUpdateArgs(force: boolean): string[] {
@@ -1138,17 +1363,122 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 }
 
 /**
+ * Old-name globals a rename migration removes after the new install exists:
+ * the set difference between the old install's top-level globals
+ * ({@link buildVersionedPackageInstallArgs} installs the agent, natives core,
+ * and platform leaf explicitly) and the resolved install's. An agent-only
+ * rename keeps the natives names, and removing them would strip the addon
+ * the new install just pinned.
+ */
+export function buildRenameCleanupPackages(
+	packages: ReleasePackages,
+	nativeTag: string = currentNativeTag(),
+): string[] {
+	const old = [PACKAGE, NATIVES_PACKAGE];
+	if (SUPPORTED_NATIVE_TAGS.has(nativeTag)) {
+		old.push(`${NATIVES_PACKAGE}-${nativeTag}`);
+	}
+	const newLeaf = `${packages.natives}-${nativeTag}`;
+	return old.filter(name => name !== packages.pkg && name !== packages.natives && name !== newLeaf);
+}
+
+/** Injectable shell steps for {@link migrateRenamedInstall}; commands return process exit codes. */
+export interface RenameMigrationSteps {
+	/** Globally install the new package names. MUST be idempotent: re-running re-links the `omp` bin. */
+	install(): Promise<number>;
+	/** Remove the old-name globals. */
+	removeOld(): Promise<number>;
+	/** Check the PATH-resolved `omp` against the expected version. */
+	verify(): Promise<InstalledVersionVerification>;
+}
+
+/** Production {@link RenameMigrationSteps}: bun/npm global installs plus PATH verification. */
+function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseInfo): RenameMigrationSteps {
+	const nativeTag = currentNativeTag();
+	return {
+		async install() {
+			if (manager === "bun") {
+				const args = buildBunInstallArgsForRelease(release, nativeTag, release.packages);
+				return (await $`bun ${args}`.nothrow()).exitCode;
+			}
+			const args = buildNpmInstallArgsForRelease(release, nativeTag, release.packages, { force: true });
+			return (await $`npm ${args}`.nothrow()).exitCode;
+		},
+		async removeOld() {
+			// One invocation per package: a single batched remove fails wholesale
+			// when any name is absent (e.g. the platform leaf on an old install),
+			// which would skip the agent package that actually owns the bin.
+			let agentExit = 0;
+			for (const pkg of buildRenameCleanupPackages(release.packages, nativeTag)) {
+				const result =
+					manager === "bun"
+						? await $`bun remove -g ${pkg}`.quiet().nothrow()
+						: await $`npm uninstall -g ${pkg}`.quiet().nothrow();
+				if (pkg === PACKAGE) agentExit = result.exitCode;
+			}
+			return agentExit;
+		},
+		verify: () => verifyInstalledVersion(release.version),
+	};
+}
+
+/**
+ * Migrate a package-manager install across an `omp.rename` hop without a
+ * window where no working `omp` exists:
+ *
+ * 1. Install the new package FIRST. Nothing has been removed yet, so a
+ *    failure here leaves the old install fully functional.
+ * 2. Remove the old-name globals. Failure is non-fatal: a stale package
+ *    wastes disk, but the bin already points at the new install.
+ * 3. Verify the PATH-resolved `omp`. If the removal deleted the shared bin
+ *    link (manager-dependent), re-run the idempotent install to restore it
+ *    and verify again; only a repeated failure aborts, with a recovery hint.
+ */
+export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameMigrationSteps): Promise<void> {
+	console.log(chalk.dim(`npm package renamed to ${release.packages.pkg}; migrating this install.`));
+	const installExit = await steps.install();
+	if (installExit !== 0) {
+		throw new Error(
+			`install of ${release.packages.pkg} failed with exit code ${installExit}; the existing install was left untouched`,
+		);
+	}
+
+	const removeExit = await steps.removeOld();
+	if (removeExit !== 0) {
+		console.log(chalk.yellow(`Warning: could not remove the old ${PACKAGE} package; remove it manually later.`));
+	}
+
+	let verification = await steps.verify();
+	if (!verification.ok) {
+		// Removing the old package may have taken the shared bin link with it;
+		// reinstalling the new package restores the link.
+		if ((await steps.install()) === 0) {
+			verification = await steps.verify();
+		}
+	}
+	if (!verification.ok) {
+		throw new Error(
+			`${formatVerificationFailure(verification, release.version)}; reinstall with: curl -fsSL https://omp.sh/install | sh`,
+		);
+	}
+	printVerifiedVersion(release.version);
+}
+
+/**
  * Update via package manager.
  */
 async function updateViaBun(release: ReleaseInfo): Promise<void> {
 	console.log(chalk.dim("Updating via bun..."));
-	const args = buildBunInstallArgsForRelease(release);
-	const result = await $`bun ${args}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`bun install failed with exit code ${result.exitCode}`);
+	if (release.packages.pkg !== PACKAGE) {
+		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release));
+	} else {
+		const args = buildBunInstallArgsForRelease(release, currentNativeTag(), release.packages);
+		const result = await $`bun ${args}`.nothrow();
+		if (result.exitCode !== 0) {
+			throw new Error(`bun install failed with exit code ${result.exitCode}`);
+		}
+		await printVerification(release.version);
 	}
-
-	await printVerification(release.version);
 	try {
 		const pruneResult = await pruneBunCacheAfterGlobalInstall();
 		if (pruneResult && pruneResult.removedEntries > 0) {
@@ -1161,7 +1491,11 @@ async function updateViaBun(release: ReleaseInfo): Promise<void> {
 
 async function updateViaNpm(release: ReleaseInfo): Promise<void> {
 	console.log(chalk.dim("Updating via npm..."));
-	const args = buildNpmInstallArgsForRelease(release);
+	if (release.packages.pkg !== PACKAGE) {
+		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release));
+		return;
+	}
+	const args = buildNpmInstallArgsForRelease(release, currentNativeTag(), release.packages);
 	const result = await $`npm ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
@@ -1206,6 +1540,11 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 	await printVerification(expectedVersion);
 }
 
+// Monotonic within this process so two updates started in the same millisecond
+// (same pid, same `Date.now()`) still get distinct temp/backup paths. Kept
+// numeric so the artifact sweep's `\d+(\.\d+)*` matcher still reclaims them.
+let updateAttemptSeq = 0;
+
 /**
  * Download a release binary to a target path, replacing an existing file.
  */
@@ -1221,12 +1560,18 @@ export async function updateViaBinaryAt(
 	} = {},
 ): Promise<void> {
 	const binaryName = options.binaryName ?? getBinaryName();
-	const tempPath = `${targetPath}.new`;
-	// Unique per attempt: a stale backup from an earlier update may still be
-	// locked (it is the previous process image on Windows), and a fixed name
-	// would force the move-aside rename to overwrite it. pid + timestamp keeps
-	// two forced updates in the same millisecond from colliding.
-	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
+	// Unique per attempt so two overlapping `omp update` runs never share a temp
+	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
+	// pre-download unlink delete the first run's still-downloading temp file; the
+	// first kept writing to its open fd (size + digest still passed), then chmod
+	// hit the missing path and the update aborted (issue #8434). The backup needs
+	// the same uniqueness: a stale backup from an earlier update may still be
+	// locked (the previous process image on Windows), so a fixed name would force
+	// the move-aside rename to overwrite it. pid, timestamp, and a process-local
+	// counter keep two updates started in the same millisecond from colliding.
+	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
+	const tempPath = `${targetPath}.${attempt}.new`;
+	const backupPath = `${targetPath}.${attempt}.bak`;
 	const asset = await getReleaseBinaryAsset(
 		expectedVersion,
 		binaryName,
@@ -1244,16 +1589,22 @@ export async function updateViaBinaryAt(
 	});
 	console.log(chalk.dim(`Verified ${asset.digest}`));
 
-	console.log(chalk.dim("Installing update..."));
-	await replaceBinaryForUpdate({
-		targetPath,
-		tempPath,
-		backupPath,
-		expectedVersion,
-		verifyInstalledVersion: options.verifyInstalledVersion ?? verifyInstalledVersion,
+	// Serialize the target swap and stale-artifact sweep per target so two
+	// overlapping `omp update` runs never replace the same binary concurrently
+	// or reclaim each other's live backup/temp files. The download above writes
+	// to a unique temp path and is safe to overlap; only the swap is shared.
+	await withFileLock(targetPath, async () => {
+		console.log(chalk.dim("Installing update..."));
+		await replaceBinaryForUpdate({
+			targetPath,
+			tempPath,
+			backupPath,
+			expectedVersion,
+			verifyInstalledVersion: options.verifyInstalledVersion ?? verifyInstalledVersion,
+		});
+		// Reclaim backups from earlier updates whose owning process has since exited.
+		await sweepStaleUpdateArtifacts(targetPath);
 	});
-	// Reclaim backups from earlier updates whose owning process has since exited.
-	await sweepStaleBackups(targetPath);
 	printVerifiedVersion(expectedVersion);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
@@ -1301,7 +1652,8 @@ export async function updateViaShimTakeover(
 	const binaryName = options.binaryName ?? getBinaryName();
 	const launcherDir = path.dirname(shimPath);
 	const exePath = path.join(launcherDir, `${APP_NAME}.exe`);
-	const tempPath = `${exePath}.new`;
+	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
+	const tempPath = `${exePath}.${attempt}.new`;
 	const asset = await getReleaseBinaryAsset(
 		expectedVersion,
 		binaryName,
@@ -1318,65 +1670,69 @@ export async function updateViaShimTakeover(
 		fetchImpl: options.fetchImpl,
 	});
 	console.log(chalk.dim(`Verified ${asset.digest}`));
-
-	console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
-	await fs.promises.rename(tempPath, exePath);
-	// Retire the shims so PATH resolution lands on the new exe. Renamed, not
-	// deleted: restorable on verification failure, and Windows permits
-	// renaming a batch file that is still executing. A shim that cannot be
-	// renamed (held open without delete sharing) is rewritten in place as a
-	// forwarder to the exe — write and rename take different Windows locks,
-	// so one can succeed where the other fails.
-	const backupSuffix = `${Date.now()}.${process.pid}.bak`;
-	const retired: Array<{ launcher: string; backup: string }> = [];
 	const forwarded: Array<{ launcher: string; original: string }> = [];
 	const stuck: string[] = [];
-	for (const ext of ["", ".cmd", ".ps1", ".bat"]) {
-		const launcher = path.join(launcherDir, `${APP_NAME}${ext}`);
-		const backup = `${launcher}.${backupSuffix}`;
-		try {
-			await fs.promises.rename(launcher, backup);
-			retired.push({ launcher, backup });
-		} catch (err) {
-			if (isEnoent(err)) continue;
+	// Serialize the launcher swap and artifact sweep so two overlapping updates
+	// never retire the same shims or reclaim a live run's backup before its
+	// verification can roll it back.
+	await withFileLock(exePath, async () => {
+		console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
+		await fs.promises.rename(tempPath, exePath);
+		// Retire the shims so PATH resolution lands on the new exe. Renamed, not
+		// deleted: restorable on verification failure, and Windows permits
+		// renaming a batch file that is still executing. A shim that cannot be
+		// renamed (held open without delete sharing) is rewritten in place as a
+		// forwarder to the exe — write and rename take different Windows locks,
+		// so one can succeed where the other fails.
+		const backupSuffix = `${attempt}.bak`;
+		const retired: Array<{ launcher: string; backup: string }> = [];
+		for (const ext of ["", ".cmd", ".ps1", ".bat"]) {
+			const launcher = path.join(launcherDir, `${APP_NAME}${ext}`);
+			const backup = `${launcher}.${backupSuffix}`;
 			try {
-				const original = await Bun.file(launcher).text();
-				await Bun.write(launcher, SHIM_FORWARDERS[ext]);
-				forwarded.push({ launcher, original });
-			} catch {
-				stuck.push(launcher);
+				await fs.promises.rename(launcher, backup);
+				retired.push({ launcher, backup });
+			} catch (err) {
+				if (isEnoent(err)) continue;
+				try {
+					const original = await Bun.file(launcher).text();
+					await Bun.write(launcher, SHIM_FORWARDERS[ext]);
+					forwarded.push({ launcher, original });
+				} catch {
+					stuck.push(launcher);
+				}
 			}
 		}
-	}
 
-	// Verify the exe by its explicit path: $which cached the shim path when
-	// the update target was resolved, and the shim was just renamed away, so
-	// a PATH re-resolution here would test a file that no longer exists.
-	const verify = options.verifyBinary ?? verifyBinaryAtPath;
-	const verification = await verify(exePath, expectedVersion);
-	if (!verification.ok) {
-		for (const { launcher, backup } of retired) {
-			try {
-				await fs.promises.rename(backup, launcher);
-			} catch {}
+		// Verify the exe by its explicit path: $which cached the shim path when
+		// the update target was resolved, and the shim was just renamed away, so
+		// a PATH re-resolution here would test a file that no longer exists.
+		const verify = options.verifyBinary ?? verifyBinaryAtPath;
+		const verification = await verify(exePath, expectedVersion);
+		if (!verification.ok) {
+			for (const { launcher, backup } of retired) {
+				try {
+					await fs.promises.rename(backup, launcher);
+				} catch {}
+			}
+			for (const { launcher, original } of forwarded) {
+				try {
+					await Bun.write(launcher, original);
+				} catch {}
+			}
+			await unlinkIfExists(exePath);
+			throw new Error(
+				`${formatVerificationFailure(verification, expectedVersion)}; restored previous ${APP_NAME} launcher`,
+			);
 		}
-		for (const { launcher, original } of forwarded) {
-			try {
-				await Bun.write(launcher, original);
-			} catch {}
+		for (const { backup } of retired) {
+			await removeBackupBestEffort(backup);
 		}
-		await unlinkIfExists(exePath);
-		throw new Error(
-			`${formatVerificationFailure(verification, expectedVersion)}; restored previous ${APP_NAME} launcher`,
-		);
-	}
-	for (const { backup } of retired) {
-		await removeBackupBestEffort(backup);
-	}
-	// Reclaim exe backups and retired-shim leftovers from earlier attempts.
-	for (const ext of [".exe", "", ".cmd", ".ps1", ".bat"]) {
-		await sweepStaleBackups(path.join(launcherDir, `${APP_NAME}${ext}`));
-	}
+		// Reclaim exe backups and retired-shim leftovers from earlier attempts.
+		for (const ext of [".exe", "", ".cmd", ".ps1", ".bat"]) {
+			await sweepStaleUpdateArtifacts(path.join(launcherDir, `${APP_NAME}${ext}`));
+		}
+	});
 	for (const { launcher } of forwarded) {
 		console.log(chalk.dim(`Converted ${launcher} to a forwarder (it could not be removed).`));
 	}
@@ -1431,6 +1787,9 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	} else {
 		console.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
 	}
+	if (release.packages.pkg !== PACKAGE) {
+		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
+	}
 
 	if (opts.check) {
 		// Just check, don't install
@@ -1444,7 +1803,10 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	try {
 		const forceBinary = shouldForceBinaryUpdate(release);
 		const target = await resolveUpdateTarget({ allowPackageManagers: !forceBinary });
-		if (target.method === "brew") {
+		if (target.method === "nix") {
+			console.log(chalk.yellow("This installation is managed by Nix and cannot update itself."));
+			console.log(chalk.dim("Update the flake input or profile that provides omp, then rebuild."));
+		} else if (target.method === "brew") {
 			await updateViaHomebrew(release.version, opts.force);
 		} else if (target.method === "mise") {
 			await updateViaMise(release.version, opts.force);

@@ -625,9 +625,12 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner and must reach the input handler — it is
+		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// exclusively a terminal->host report, never a keystroke, so a reply that
+		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
+		// into the composer as literal text (#8542).
 		process.stdin.emit("data", "\x1b[?1;2c");
-		expect(received).toEqual(["\x1b[?1;2c"]);
+		expect(received).toEqual([]);
 
 		terminal.stop();
 	});

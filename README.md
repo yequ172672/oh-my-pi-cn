@@ -81,6 +81,31 @@ curl -fsSL https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/main/scripts
 bun install -g omp-cn
 ```
 
+**Nix**
+
+```sh
+# 无需安装直接运行
+nix run github:yequ172672/oh-my-pi-cn
+
+# 或安装到当前 profile
+nix profile install github:yequ172672/oh-my-pi-cn
+```
+
+Flake 使用者可以使用 `packages.<system>.omp`、`overlays.default`、`nixosModules.default` 或 `homeManagerModules.default`。Home Manager 配置可以声明式安装 OMP 并管理设置：
+
+```nix
+{
+  inputs.omp.url = "github:yequ172672/oh-my-pi-cn";
+
+  # 在 Home Manager 模块中：
+  imports = [ inputs.omp.homeManagerModules.default ];
+  programs.omp = {
+    enable = true;
+    settings.startup.quiet = true;
+  };
+}
+```
+
 **Windows（PowerShell）**
 
 ```powershell
@@ -612,6 +637,22 @@ bun dev
 ```
 
 bun setup 会安装 Bun workspace，并构建 @oh-my-pi/pi-natives。修改 Rust crate 或 packages/natives 后，请重新运行 bun run build:native。
+
+Nix 用户可获得固定版本的 Bun、Rust 工具链和全部原生构建依赖：
+
+```sh
+nix develop
+bun setup
+bun dev
+```
+
+使用 `nix build .#omp` 构建并冒烟测试可分发的 Nix 包。Wayland 屏幕录制默认关闭（链接 libpipewire 会增加约 750 MB 运行时闭包）；可通过 `omp.override { withWaylandScreencast = true; }` 启用。`nix/bun.nix` 只在 `bun.lock` 变化时生成，发行流程会自动重新生成。依赖变化后运行：
+
+```sh
+bun run gen:nix
+```
+
+该命令优先使用 `nix develop` 提供的 `bun2nix`，否则通过 Nix 进入开发环境，最后回退到固定版本的 `bunx bun2nix@2.1.2`。不要手动编辑 `nix/bun.nix`。
 
 执行非交互式冒烟检查：
 

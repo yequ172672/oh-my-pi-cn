@@ -242,7 +242,6 @@ export interface SessionAdvisorsHost {
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
-	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
 	allowAgentInitiatedTurns(): boolean;
@@ -263,7 +262,11 @@ export interface SessionAdvisorsHost {
 		signal: AbortSignal,
 	): Promise<Model | undefined>;
 	resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): Model[];
-	resolveRetryFallbackRole(currentSelector: string, currentModel?: Model | null): string | undefined;
+	resolveRetryFallbackRole(
+		currentSelector: string,
+		currentModel?: Model | null,
+		roleHint?: string,
+	): string | undefined;
 	findRetryFallbackCandidates(
 		role: string,
 		currentSelector: string,
@@ -653,7 +656,6 @@ export class SessionAdvisors {
 		if (this.#host.isDisposed()) return false;
 		if (this.#advisors.length > 0) return true;
 		if (!this.#advisorEnabled) return false;
-		if (this.#host.agentKind() !== "main" && !this.#host.settings.get("advisor.subagents")) return false;
 
 		// Rebuild the status map from scratch so removed/renamed advisors don't
 		// leave stale entries. #resolveAdvisorRuntimeDescriptors populates every
@@ -1238,7 +1240,8 @@ export class SessionAdvisors {
 
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		const role = advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel);
+		const role =
+			advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel, "advisor");
 		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
 			return false;
 
@@ -1621,9 +1624,10 @@ export class SessionAdvisors {
 
 	/**
 	 * Whether a live advisor agent is attached to this session. True only when
-	 * `advisor.enabled` is set AND a model resolved for the `advisor` role AND
-	 * the advisor applies to this agent kind — i.e. the actual runtime exists,
-	 * not merely the setting. Drives the status-line badge and `/dump advisor`.
+	 * `advisor.enabled` is set for this session (subagents opt in per agent via
+	 * frontmatter `advisor` / `task.agentAdvisor`) AND a model resolved for the
+	 * `advisor` role — i.e. the actual runtime exists, not merely the setting.
+	 * Drives the status-line badge and `/dump advisor`.
 	 */
 	isAdvisorActive(): boolean {
 		return this.#advisors.length > 0;

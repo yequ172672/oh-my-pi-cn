@@ -21,9 +21,11 @@ import { resolveModelThinking } from "../src/model-thinking";
 import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../src/provider-models/ollama";
 import {
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
+	applyXaiResponsesThinkingPolicy,
+	OPENAI_GPT_56_LONG_CONTEXT_COSTS,
 	resolveWaferServerlessThinkingFormat,
 } from "../src/provider-models/openai-compat";
-import type { Api, Model, ModelSpec } from "../src/types";
+import type { Api, LongContextTokenCost, Model, ModelSpec } from "../src/types";
 import { isVariantCollapsedSpec } from "../src/variant-collapse";
 import { buildCanonicalModelIndex, buildCanonicalReferenceData } from "./equivalence";
 
@@ -142,6 +144,39 @@ const CODEX_GPT_5_4_PRIORITY_BY_VARIANT: Partial<Record<OpenAIVariant, number>> 
 	mini: 1,
 	nano: 2,
 };
+
+const CODEX_GPT_5_6_372K_MODEL_IDS: Record<string, true> = {
+	"gpt-5.6-luna": true,
+	"gpt-5.6-sol": true,
+	"gpt-5.6-terra": true,
+};
+
+const OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID: Readonly<Record<string, LongContextTokenCost>> = {
+	"daybreak-blue-latest": OPENAI_GPT_56_LONG_CONTEXT_COSTS.sol,
+	"gpt-5.6": OPENAI_GPT_56_LONG_CONTEXT_COSTS.sol,
+	"gpt-5.6-luna": OPENAI_GPT_56_LONG_CONTEXT_COSTS.luna,
+	"gpt-5.6-sol": OPENAI_GPT_56_LONG_CONTEXT_COSTS.sol,
+	"gpt-5.6-terra": OPENAI_GPT_56_LONG_CONTEXT_COSTS.terra,
+};
+
+const OPENAI_NONE_EFFORT_MODEL_IDS: Record<string, true> = {
+	"daybreak-blue-latest": true,
+	"daybreak-red-latest": true,
+	"gpt-5.6": true,
+	"gpt-5.6-cyber": true,
+	"gpt-5.6-luna": true,
+	"gpt-5.6-sol": true,
+	"gpt-5.6-terra": true,
+};
+
+function modelOrRequestIdValue<T>(
+	model: Pick<ModelSpec<Api>, "id" | "requestModelId">,
+	values: Readonly<Record<string, T>>,
+): T | undefined {
+	const direct = values[bareModelId(model.id)];
+	if (direct !== undefined) return direct;
+	return model.requestModelId === undefined ? undefined : values[bareModelId(model.requestModelId)];
+}
 
 const COPILOT_GENERATED_LIMITS: Record<string, { contextWindow: number; maxTokens: number }> = {
 	"claude-opus-4.6": { contextWindow: 168000, maxTokens: 32000 },
@@ -319,6 +354,10 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
+	if ((model.provider === "xai" || model.provider === "xai-oauth") && model.api === "openai-responses") {
+		const updated = applyXaiResponsesThinkingPolicy(model as ModelSpec<"openai-responses">);
+		model.compat = updated.compat;
+	}
 	const copilotLimits = model.provider === "github-copilot" ? COPILOT_GENERATED_LIMITS[model.id] : undefined;
 	if (copilotLimits) {
 		model.contextWindow = copilotLimits.contextWindow;
@@ -333,9 +372,13 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		model.omitMaxOutputTokens = true;
 	}
 
-	// GLM Coding Plan: GLM-5.2 is the selectable 1M served id; pin it so
+	// GLM Coding Plan: the selectable 1M-context served ids; pin them so
 	// endpoint discovery or older bundled fallbacks cannot regress to 200k.
-	if ((model.provider === "zai" || model.provider === "zhipu-coding-plan") && model.id === "glm-5.2") {
+	// GLM-5.3 succeeds GLM-5.2 with the same 1M context window.
+	if (
+		(model.provider === "zai" || model.provider === "zhipu-coding-plan") &&
+		(model.id === "glm-5.2" || model.id === "glm-5.3")
+	) {
 		model.contextWindow = 1_000_000;
 		model.maxTokens = 131_072;
 	}
@@ -391,7 +434,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		};
 	}
 	if (
-		model.api === "openai-completions" &&
+		(model.api === "openai-completions" || model.api === "openai-responses") &&
 		model.provider === "opencode-go" &&
 		(model.id === "deepseek-v4-flash" || model.id === "deepseek-v4-pro")
 	) {
@@ -464,6 +507,17 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIModel): void {
+	const isFirstPartyResponses = model.provider === "openai" && model.api === "openai-responses";
+	if (isFirstPartyResponses && modelOrRequestIdValue(model, OPENAI_NONE_EFFORT_MODEL_IDS)) {
+		model.compat = { ...(model.compat ?? {}), reasoningDisableMode: "none-effort" };
+	}
+	const longContextCost = isFirstPartyResponses
+		? modelOrRequestIdValue(model, OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID)
+		: undefined;
+	if (longContextCost) {
+		model.cost = { ...model.cost, longContext: longContextCost };
+	}
+
 	// Codex models: 400K figure includes output budget; input window is 272K.
 	if (parsedModel.variant.startsWith("codex") && parsedModel.variant !== "codex-spark") {
 		model.contextWindow = 272000;
@@ -487,7 +541,7 @@ function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIMode
 	// discovery omits `context_window` for these SKUs and falls back to
 	// DEFAULT_CONTEXT_WINDOW (272000, src/discovery/codex.ts), which regressed
 	// the bundled hard capacity (#5705). Pin the true 372K input window.
-	if (model.api === "openai-codex-responses" && semverEqual(parsedModel.version, "5.6")) {
+	if (model.api === "openai-codex-responses" && CODEX_GPT_5_6_372K_MODEL_IDS[model.id]) {
 		model.contextWindow = 372000;
 	}
 }

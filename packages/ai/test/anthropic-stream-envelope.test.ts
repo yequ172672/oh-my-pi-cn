@@ -6,7 +6,10 @@ import {
 	type AnthropicMessagesClientLike,
 	type AnthropicRequestOptions,
 } from "@oh-my-pi/pi-ai/providers/anthropic-client";
-import type { WebSearchToolResultBlockParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type {
+	ToolSearchToolResultBlockParam,
+	WebSearchToolResultBlockParam,
+} from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
@@ -673,6 +676,117 @@ describe("anthropic stream envelope handling", () => {
 				content: "forecast contents",
 				is_error: false,
 			},
+		]);
+	});
+
+	it("replays tool-search server blocks between signed thinking and a client tool call", async () => {
+		const toolSearchResult: ToolSearchToolResultBlockParam = {
+			type: "tool_search_tool_result",
+			tool_use_id: "srvtoolu_search",
+			content: {
+				type: "tool_search_tool_search_result",
+				tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+			},
+		};
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_tool_search",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Find read." } },
+					{ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-1" } },
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "content_block_start",
+						index: 1,
+						content_block: {
+							type: "server_tool_use",
+							id: "srvtoolu_search",
+							name: "tool_search_tool_regex",
+						},
+					},
+					{
+						type: "content_block_delta",
+						index: 1,
+						delta: { type: "input_json_delta", partial_json: '{"pattern":"read"}' },
+					},
+					{ type: "content_block_stop", index: 1 },
+					{ type: "content_block_start", index: 2, content_block: toolSearchResult },
+					{ type: "content_block_stop", index: 2 },
+					{ type: "content_block_start", index: 3, content_block: { type: "thinking", thinking: "" } },
+					{ type: "content_block_delta", index: 3, delta: { type: "thinking_delta", thinking: "Use read." } },
+					{ type: "content_block_delta", index: 3, delta: { type: "signature_delta", signature: "sig-2" } },
+					{ type: "content_block_stop", index: 3 },
+					{
+						type: "content_block_start",
+						index: 4,
+						content_block: { type: "tool_use", id: "tool_1", name: "_read", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 4,
+						delta: { type: "input_json_delta", partial_json: '{"path":"notes.txt"}' },
+					},
+					{ type: "content_block_stop", index: 4 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "tool_use" },
+						usage: {
+							input_tokens: 12,
+							output_tokens: 20,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = structuredCloneJSON(await stream.result());
+		const replay = convertAnthropicMessages(
+			[
+				context.messages[0],
+				result,
+				{
+					role: "toolResult",
+					toolCallId: "tool_1",
+					toolName: "_read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			model,
+			false,
+		);
+		const assistant = replay.find(message => message.role === "assistant");
+
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "Find read.", signature: "sig-1" },
+			{
+				type: "server_tool_use",
+				id: "srvtoolu_search",
+				name: "tool_search_tool_regex",
+				input: { pattern: "read" },
+			},
+			toolSearchResult,
+			{ type: "thinking", thinking: "Use read.", signature: "sig-2" },
+			{ type: "tool_use", id: "tool_1", name: "_read", input: { path: "notes.txt" } },
 		]);
 	});
 
@@ -1735,7 +1849,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(cacheControls[2]).toEqual({ type: "ephemeral" });
 	});
 
-	it("defaults API-key requests to 1h cache TTL where long retention is supported", async () => {
+	it("defaults Anthropic requests to 5m writes and keeps 1h retention opt-in", async () => {
 		type CapturedParams = { messages: Array<{ content: unknown }> };
 		const payloads: CapturedParams[] = [];
 		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
@@ -1758,7 +1872,7 @@ describe("anthropic stream envelope handling", () => {
 
 		await drain(model);
 		await drain(proxyModel);
-		await withEnv({ PI_CACHE_RETENTION: "short" }, () => drain(model));
+		await withEnv({ PI_CACHE_RETENTION: "long" }, () => drain(model));
 
 		const cacheControls = payloads.map(payload => {
 			const content = payload.messages.at(-1)?.content;
@@ -1766,13 +1880,8 @@ describe("anthropic stream envelope handling", () => {
 			const lastBlock: { cache_control?: { ttl?: string; type: string } } | undefined = content.at(-1);
 			return lastBlock?.cache_control;
 		});
-		// Agent sessions idle past 5 minutes on background jobs; the canonical
-		// Anthropic API defaults to the 1h breakpoint so resume doesn't cold-miss
-		// the whole prefix.
-		expect(cacheControls[0]).toEqual({ type: "ephemeral", ttl: "1h" });
-		// Endpoints without long-cache support keep the plain 5m breakpoint.
+		expect(cacheControls[0]).toEqual({ type: "ephemeral" });
 		expect(cacheControls[1]).toEqual({ type: "ephemeral" });
-		// PI_CACHE_RETENTION=short opts back out of the 1h default.
-		expect(cacheControls[2]).toEqual({ type: "ephemeral" });
+		expect(cacheControls[2]).toEqual({ type: "ephemeral", ttl: "1h" });
 	});
 });

@@ -107,6 +107,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 		contextFiles: [],
 		promptTemplates: [],
 		workspaceTree: emptyWorkspaceTree(dirs.cwd),
+		// This suite exercises the SDK's credential event bridge, not ambient tools.
+		// Avoid rebuilding the full built-in/custom-tool surface for every session.
+		toolNames: ["read"],
+		preloadedCustomToolPaths: [],
+		skipPythonPreflight: true,
 		slashCommands: [],
 		enableMCP: false,
 		enableLsp: false,

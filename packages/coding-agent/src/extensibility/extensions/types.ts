@@ -86,6 +86,8 @@ import type {
 	AutoRetryStartEvent,
 	ContextEvent,
 	GoalUpdatedEvent,
+	RetryFallbackAppliedEvent,
+	RetryFallbackSucceededEvent,
 	SessionBeforeBranchEvent,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactEvent,
@@ -232,6 +234,8 @@ export interface ExtensionCustomOptions {
 	overlayOptions?: OverlayOptions | (() => OverlayOptions);
 	/** Invoked with the overlay handle once the overlay is created (overlay mode only). */
 	onHandle?: (handle: OverlayHandle) => void;
+	/** Abort the custom UI and reject its promise. */
+	signal?: AbortSignal;
 }
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
@@ -432,9 +436,14 @@ export interface ExtensionModelQuery {
 	family(model: Model): string;
 }
 
+/** Runtime host mode exposed to Pi-compatible extensions. */
+export type ExtensionMode = "tui" | "rpc" | "json" | "print";
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
+	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
+	mode: ExtensionMode;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
@@ -731,7 +740,10 @@ export interface MessageUpdateEvent {
 	assistantMessageEvent: AssistantMessageEvent;
 }
 
-/** Fired when a message ends */
+/**
+ * Fired when a message ends. Notification-only: the message is a detached
+ * snapshot, so in-place changes do not rewrite agent or provider context.
+ */
 export interface MessageEndEvent {
 	type: "message_end";
 	message: AgentMessage;
@@ -769,6 +781,8 @@ export type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	RetryFallbackAppliedEvent,
+	RetryFallbackSucceededEvent,
 	TodoReminderEvent,
 	TtsrTriggeredEvent,
 } from "../shared-events";
@@ -1031,6 +1045,8 @@ export type ExtensionEvent =
 	| AutoCompactionEndEvent
 	| AutoRetryStartEvent
 	| AutoRetryEndEvent
+	| RetryFallbackAppliedEvent
+	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
 	| GoalUpdatedEvent
@@ -1218,6 +1234,8 @@ export interface ExtensionAPI {
 	on(event: "auto_compaction_end", handler: ExtensionHandler<AutoCompactionEndEvent>): void;
 	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
 	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
+	on(event: "retry_fallback_applied", handler: ExtensionHandler<RetryFallbackAppliedEvent>): void;
+	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;

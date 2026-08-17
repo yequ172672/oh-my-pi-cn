@@ -50,7 +50,14 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return result.content.find(part => part.type === "text")?.text ?? "";
 }
 
-const neverResolves = () => new Promise<string>(() => {});
+const runsUntilAborted = ({ signal }: { signal: AbortSignal }) =>
+	new Promise<string>(resolve => {
+		if (signal.aborted) {
+			resolve("");
+			return;
+		}
+		signal.addEventListener("abort", () => resolve(""), { once: true });
+	});
 
 afterEach(async () => {
 	for (const manager of managers.splice(0)) {
@@ -90,10 +97,18 @@ describe("hub jobs snapshot", () => {
 		const manager = createManager();
 		const registry = new AgentRegistry();
 		// Task-style spawn: job id == agent id.
-		manager.register("task", "AgentA", neverResolves, { id: "AgentA", agentId: "AgentA", ownerId: "Main" });
+		manager.register("task", "AgentA", runsUntilAborted, {
+			id: "AgentA",
+			agentId: "AgentA",
+			ownerId: "Main",
+		});
 		registerRunningSub(registry, "AgentA");
 		// Vibe-style turn job: job id differs from the agent id; linkage via agentId.
-		manager.register("task", "vibe turn", neverResolves, { id: "vibe-1-t1", agentId: "vibe-1", ownerId: "Main" });
+		manager.register("task", "vibe turn", runsUntilAborted, {
+			id: "vibe-1-t1",
+			agentId: "vibe-1",
+			ownerId: "Main",
+		});
 		registerRunningSub(registry, "vibe-1");
 		// Woken via irc: running agent with no job at all.
 		registerRunningSub(registry, "Loner");

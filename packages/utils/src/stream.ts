@@ -281,11 +281,16 @@ export async function* readSseJson<T>(
  * - `raw` is the list of decoded non-empty lines that made up the event,
  *   preserved for diagnostic context (error reporting, debugging). The
  *   dispatching blank line is not included.
+ * - `id` and `retry` are present only when the event carried valid fields with
+ *   those names. Control-only events are yielded so reconnecting transports can
+ *   retain the cursor and server-requested retry interval.
  */
 export interface ServerSentEvent {
 	event: string | null;
 	data: string;
 	raw: string[];
+	id?: string;
+	retry?: number;
 }
 
 interface SseEventState {
@@ -296,6 +301,8 @@ interface SseEventState {
 	// seen yet" (distinct from a `data:` field with an empty value).
 	data: string | null;
 	raw: string[];
+	id?: string;
+	retry?: number;
 }
 
 // Complete lines are decoded in one batch per source chunk. Each batch ends on
@@ -303,7 +310,7 @@ interface SseEventState {
 const SSE_DECODER = new TextDecoder("utf-8");
 
 function flushSseEvent(state: SseEventState): ServerSentEvent | null {
-	if (state.event === null && state.data === null) {
+	if (state.event === null && state.data === null && state.id === undefined && state.retry === undefined) {
 		state.raw = [];
 		return null;
 	}
@@ -312,9 +319,13 @@ function flushSseEvent(state: SseEventState): ServerSentEvent | null {
 		data: state.data ?? "",
 		raw: state.raw,
 	};
+	if (state.id !== undefined) event.id = state.id;
+	if (state.retry !== undefined) event.retry = state.retry;
 	state.event = null;
 	state.data = null;
 	state.raw = [];
+	state.id = undefined;
+	state.retry = undefined;
 	return event;
 }
 
@@ -348,9 +359,22 @@ function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null
 			state.data += "\n";
 			state.data += value;
 		}
+	} else if (fieldName === "id") {
+		if (!value.includes("\0")) state.id = value;
+	} else if (fieldName === "retry" && value.length > 0) {
+		let valid = true;
+		for (let index = 0; index < value.length; index++) {
+			const code = value.charCodeAt(index);
+			if (code < 0x30 || code > 0x39) {
+				valid = false;
+				break;
+			}
+		}
+		if (valid) {
+			const retry = Number(value);
+			if (Number.isSafeInteger(retry)) state.retry = retry;
+		}
 	}
-	// `id` and `retry` are intentionally ignored — the providers we consume
-	// don't use them, and the underlying transport handles reconnects itself.
 	return null;
 }
 
@@ -422,12 +446,13 @@ export async function* readSseEvents(
  * Uses `Bun.JSONL.parseChunk` internally. On parse errors, the malformed
  * region is skipped up to the next newline and parsing continues.
  *
+ * @param options.onMalformedRecord Called once for every skipped JSONL record.
  * @example
  * ```ts
  * const entries = parseJsonlLenient<MyType>(fileContents);
  * ```
  */
-export function parseJsonlLenient<T>(buffer: string): T[] {
+export function parseJsonlLenient<T>(buffer: string, options: { onMalformedRecord?: () => void } = {}): T[] {
 	let entries: T[] | undefined;
 
 	while (buffer.length > 0) {
@@ -442,11 +467,16 @@ export function parseJsonlLenient<T>(buffer: string): T[] {
 		}
 		if (error) {
 			const nextNewline = buffer.indexOf("\n", read);
+			const malformedEnd = nextNewline === -1 ? buffer.length : nextNewline;
+			if (buffer.substring(read, malformedEnd).trim().length > 0) options.onMalformedRecord?.();
 			if (nextNewline === -1) break;
 			buffer = buffer.substring(nextNewline + 1);
 			continue;
 		}
-		if (read === 0) break;
+		if (read === 0) {
+			if (buffer.trim().length > 0) options.onMalformedRecord?.();
+			break;
+		}
 		buffer = buffer.substring(read);
 		if (done) break;
 	}

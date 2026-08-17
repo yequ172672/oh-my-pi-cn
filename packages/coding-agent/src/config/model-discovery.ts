@@ -645,7 +645,7 @@ export async function discoverLlamaCppModels(
 					name: id,
 					api: providerConfig.api,
 					provider: providerConfig.provider,
-					baseUrl,
+					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
 					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
@@ -1018,7 +1018,7 @@ export async function discoverProxyModels(
 	return discovered;
 }
 
-function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
+export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 	const defaultBaseUrl = "http://127.0.0.1:8080";
 	const raw = baseUrl || defaultBaseUrl;
 	try {
@@ -1033,7 +1033,7 @@ function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 // ensureLlamaCppV1BaseUrl appends the OpenAI-compatible `/v1` prefix a
 // chat-completions request needs; native discovery keeps the bare root, which
 // serves `/models` and `/props` but not `/chat/completions`.
-function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
+export function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
 	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
 }
 

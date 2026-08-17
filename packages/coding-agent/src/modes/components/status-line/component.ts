@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -292,6 +291,7 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class StatusLineComponent implements Component {
+	#widthEpochRevision = 0;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
 	#cachedBranch: string | null | undefined = undefined;
@@ -319,8 +319,7 @@ export class StatusLineComponent implements Component {
 	// dropped rather than overwrite the value the newer resolve committed.
 	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
 	#branchCacheGeneration = 0;
-	#gitWatcher: fs.FSWatcher | null = null;
-	#gitWatcherErrorListener: (() => void) | undefined = undefined;
+	#gitUnwatch: (() => void) | null = null;
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
@@ -664,40 +663,29 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		const watchPath = git.repo.isReftableSync(repository)
-			? path.join(repository.gitDir, "reftable")
-			: repository.headPath;
-
+		// git swaps HEAD via `HEAD.lock` + atomic rename. That both unlinks the
+		// HEAD inode (freezing a file-bound `fs.watch` after the first switch —
+		// issue #8412) and, on Bun/Linux, permanently wedges an inotify-backed
+		// directory watch after the first rename event (oven-sh/bun#24875).
+		// `git.head.watch` stat-polls the HEAD path (or the reftable dir), which
+		// survives inode swaps on every platform. A vanished repo surfaces as a
+		// stat change too, so there is no separate watcher error path.
 		try {
-			const watcher = fs.watch(watchPath, () => {
-				if (this.#disposed || this.#gitWatcher !== watcher) return;
+			const unwatch = git.head.watch(repository, () => {
+				if (this.#disposed || this.#gitUnwatch !== unwatch) return;
 				this.invalidateGitCaches();
 				this.#onBranchChange?.();
 			});
-			const onError = () => {
-				if (this.#gitWatcher !== watcher) return;
-				this.#retireGitWatcher();
-				this.#gitWatcherUnavailable = true;
-				if (this.#disposed) return;
-				this.invalidateGitCaches();
-				this.#onBranchChange?.();
-			};
-			this.#gitWatcher = watcher;
-			this.#gitWatcherErrorListener = onError;
-			watcher.on("error", onError);
+			this.#gitUnwatch = unwatch;
 		} catch {
 			this.#gitWatcherUnavailable = true;
 		}
 	}
 
 	#retireGitWatcher(): void {
-		const watcher = this.#gitWatcher;
-		const onError = this.#gitWatcherErrorListener;
-		this.#gitWatcher = null;
-		this.#gitWatcherErrorListener = undefined;
-		if (!watcher) return;
-		if (onError) watcher.off("error", onError);
-		watcher.close();
+		const unwatch = this.#gitUnwatch;
+		this.#gitUnwatch = null;
+		unwatch?.();
 	}
 
 	dispose(): void {
@@ -719,6 +707,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.#widthEpochRevision++;
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -1446,10 +1435,15 @@ export class StatusLineComponent implements Component {
 					};
 					sevenDayTier = tier || undefined;
 				}
-				// Conservatively gate monthly status-line rendering to Cursor for now —
-				// Copilot/OpenCode also emit monthly windows, but their multi-bucket
-				// shape needs a dedicated selector before we surface `mo N%` for them.
-				if (activeProvider === "cursor" && (windowId === "monthly" || windowId === "30d")) {
+				// Monthly rendering is gated to providers with a single monthly
+				// bucket (Cursor's priority selector picks its personal rail;
+				// OpenCode Go emits exactly one). Copilot also emits monthly
+				// windows, but its multi-bucket shape needs a dedicated selector
+				// before we surface `mo N%` for it.
+				if (
+					(activeProvider === "cursor" || activeProvider === "opencode-go") &&
+					(windowId === "monthly" || windowId === "30d")
+				) {
 					const priority = cursorMonthlyPriority(l.id);
 					const shouldReplace =
 						!monthly ||
@@ -1869,7 +1863,7 @@ export class StatusLineComponent implements Component {
 		return leftGroup + gapFill + rightGroup;
 	}
 
-	getTopBorder(width: number): { content: string; width: number } {
+	getTopBorder(width: number): { content: string; width: number; revision: number } {
 		let content = this.#buildStatusLine(width);
 		if (this.#focusedAgentId && content) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
@@ -1879,6 +1873,7 @@ export class StatusLineComponent implements Component {
 		return {
 			content,
 			width: visibleWidth(content),
+			revision: this.#widthEpochRevision,
 		};
 	}
 

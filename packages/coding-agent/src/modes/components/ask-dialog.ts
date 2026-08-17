@@ -4,6 +4,7 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
+	padding,
 	renderInlineMarkdown,
 	replaceTabs,
 	ScrollView,
@@ -12,6 +13,7 @@ import {
 	Text,
 	type TUI,
 	truncateToWidth,
+	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type {
@@ -316,8 +318,18 @@ function renderRowLabel(
 	const cursor = selected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 	const label = renderInlineMarkdown(rowItem.label, mdTheme, t => theme.fg(color, t));
 	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", "  ✎ note") : "";
-	const firstLine = `${cursor}${marker}${label}${noteMarker}`;
-	const lines = [truncateToWidth(firstLine, width, Ellipsis.Unicode)];
+	// `width` is already the inner content width consumed by row(); when a
+	// scrollbar is needed, renderRows() calls this again with one less column.
+	// Keep the cursor, option marker, first wrapped label line, and optional
+	// note marker within that budget so the outer fit() never truncates them.
+	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
+	const labelWidth = Math.max(1, width - visibleWidth(cursor) - visibleWidth(marker) - noteWidth);
+	const wrappedLabel = wrapTextWithAnsi(label, labelWidth);
+	const indent = padding(visibleWidth(cursor) + visibleWidth(marker));
+	const lines = [`${cursor}${marker}${wrappedLabel[0] ?? ""}${noteMarker}`];
+	for (let i = 1; i < wrappedLabel.length; i++) {
+		lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
+	}
 	if (rowItem.kind === "option") {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (option?.description?.trim()) {
@@ -603,8 +615,10 @@ export class AskDialogComponent implements Component {
 			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
+		// Enter advances in multi-question dialogs and submits single-question ones.
+		const enterAction = this.#questions.length > 1 ? "next" : "submit";
 		const action = question?.multi
-			? localizeUiText("Space/Enter toggle · n note")
+			? localizeUiText(`Space toggle · Enter ${enterAction}`)
 			: localizeUiText("Enter select · n note");
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		if (this.#questionCanPage && indicator) {
@@ -683,8 +697,14 @@ export class AskDialogComponent implements Component {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (!option) return;
 		if (question.multi) {
-			// Multi is toggle-only: Enter and Space both toggle, and the
-			// answer is confirmed from the Submit tab.
+			if (isEnter) {
+				// Enter confirms the current selection without toggling the
+				// focused option; Space toggles. Advances to the next question
+				// (submitting only for a single-question dialog), matching
+				// single-select Enter (#8252).
+				this.#advanceAfterQuestion();
+				return;
+			}
 			if (state.selectedOptions.has(option.label)) {
 				state.selectedOptions.delete(option.label);
 				clearNoteIfRow(state, rowItem.key);

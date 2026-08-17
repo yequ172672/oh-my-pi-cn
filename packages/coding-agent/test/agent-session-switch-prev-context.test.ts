@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -21,7 +20,6 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  * different-session switches MUST skip that work.
  */
 describe("AgentSession.switchSession previous-context build", () => {
-	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
@@ -29,8 +27,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 	const sessions: AgentSession[] = [];
 
 	beforeAll(async () => {
-		sharedDir = TempDir.createSync("@pi-switch-prev-ctx-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -38,11 +35,8 @@ describe("AgentSession.switchSession previous-context build", () => {
 		model = bundled;
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		try {
-			await sharedDir.remove();
-		} catch {}
 	});
 
 	afterEach(async () => {

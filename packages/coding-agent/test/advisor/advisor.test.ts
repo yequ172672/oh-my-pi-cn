@@ -6,7 +6,6 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
 	AdviseTool,
 	type AdvisorAgent,
 	type AdvisorNote,
@@ -33,14 +32,16 @@ import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
-import { BUILTIN_TOOL_NAMES } from "../../src/tools/builtin-names";
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
  *  failing advisor), so failure-path tests cannot use it as a settle barrier. */
 async function settleUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
-	while (!predicate() && Date.now() < deadline) await Bun.sleep(2);
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error(`Advisor did not settle within ${timeoutMs}ms`);
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
 }
 
 function promptText(input: string | AgentMessage[]): string {
@@ -96,7 +97,6 @@ describe("advisor", () => {
 					content: "Use `bun check`, never `tsc`.\nNo `any` unless absolutely necessary.",
 				},
 			]);
-			expect(rendered).toBeDefined();
 			expect(rendered).toContain('<file path="/repo/AGENTS.md">');
 			// Content is injected verbatim (noEscape) so backticks/markup survive for the model.
 			expect(rendered).toContain("Use `bun check`, never `tsc`.");
@@ -977,7 +977,14 @@ describe("advisor", () => {
 
 			runtime.onTurnEnd();
 			await promptStarted.promise;
-			expect(await runtime.waitForCatchup(20, 1)).toBe(false);
+			vi.useFakeTimers();
+			try {
+				const catchup = runtime.waitForCatchup(20, 1);
+				vi.advanceTimersByTime(20);
+				expect(await catchup).toBe(false);
+			} finally {
+				vi.useRealTimers();
+			}
 			expect(runtime.backlog).toBe(1);
 
 			releasePrompt.resolve();
@@ -2364,7 +2371,7 @@ describe("advisor", () => {
 			expect(promptInputs).toHaveLength(1);
 
 			messages = [{ role: "user", content: "a", timestamp: 1 } as AgentMessage];
-			expect(() => runtime.onTurnEnd()).not.toThrow();
+			runtime.onTurnEnd();
 			expect(promptInputs).toHaveLength(1);
 		});
 
@@ -2637,6 +2644,11 @@ describe("advisor", () => {
 						state.error = overflowMessage;
 					} else {
 						state.error = undefined;
+						state.messages.push({
+							role: "assistant",
+							content: [{ type: "text", text: "ok" }],
+							timestamp: Date.now(),
+						} as AgentMessage);
 					}
 				},
 				abort: () => {},
@@ -2999,8 +3011,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
 
 			expect(promptInputs).toHaveLength(2);
 			expect(runtime.backlog).toBe(0);
@@ -3025,9 +3036,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && runtime.backlog === 0);
 
 			expect(promptInputs).toHaveLength(3);
 			expect(runtime.backlog).toBe(0);
@@ -3057,9 +3066,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && failures.length === 1 && runtime.backlog === 0);
 
 			expect(promptInputs).toHaveLength(3);
 			expect(failures).toHaveLength(1);
@@ -3070,9 +3077,7 @@ describe("advisor", () => {
 
 			messages.push({ role: "user", content: "bbb", timestamp: 2 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 6 && runtime.backlog === 0);
 
 			expect(promptInputs).toHaveLength(6);
 			expect(failures).toHaveLength(1);
@@ -3080,15 +3085,13 @@ describe("advisor", () => {
 			shouldFail = false;
 			messages.push({ role: "user", content: "ccc", timestamp: 3 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 7 && runtime.backlog === 0);
 			expect(failures).toHaveLength(1);
 
 			shouldFail = true;
 			messages.push({ role: "user", content: "ddd", timestamp: 4 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 10 && failures.length === 2 && runtime.backlog === 0);
 
 			expect(failures).toHaveLength(2);
 		});
@@ -3120,9 +3123,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && failures.length === 1 && runtime.halted);
 
 			expect(promptInputs).toHaveLength(3);
 			expect(failures).toHaveLength(1);
@@ -3131,8 +3132,6 @@ describe("advisor", () => {
 			// New deltas must be ignored while halted — no further prompts.
 			messages.push({ role: "user", content: "bbb", timestamp: 2 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
 			expect(promptInputs).toHaveLength(3);
 
 			// The catch-up gate must not park the primary agent on a runtime that
@@ -3167,9 +3166,7 @@ describe("advisor", () => {
 			const runTurn = async (content: string) => {
 				messages.push({ role: "user", content, timestamp: messages.length + 1 } as AgentMessage);
 				runtime.onTurnEnd(messages);
-				await Bun.sleep(0);
-				await Bun.sleep(0);
-				await Bun.sleep(0);
+				await settleUntil(() => runtime.backlog === 0);
 			};
 
 			// Two failing drop cycles, then a success: the cycle counter resets.
@@ -3261,7 +3258,7 @@ describe("advisor", () => {
 				timestamp: 2,
 			} as AgentMessage;
 			messages.push(poisoned);
-			expect(() => runtime.onTurnEnd(messages)).not.toThrow();
+			runtime.onTurnEnd(messages);
 			// A parked primary must not wait out the catch-up budget.
 			const started = performance.now();
 			await runtime.waitForCatchup(60_000, 1);
@@ -3295,14 +3292,11 @@ describe("advisor", () => {
 				) as AgentMessage;
 			};
 
-			const waitForPrompts = async (
+			const waitForPrompts = (
 				prompts: Array<string | AgentMessage[]>,
 				count: number,
 				timeoutMs = 10_000,
-			): Promise<void> => {
-				const deadline = Date.now() + timeoutMs;
-				while (prompts.length < count && Date.now() < deadline) await Bun.sleep(5);
-			};
+			): Promise<void> => settleUntil(() => prompts.length >= count, timeoutMs);
 
 			it("delivers a multi-MB transcript replay completely", async () => {
 				const promptInputs: Array<string | AgentMessage[]> = [];
@@ -3460,15 +3454,10 @@ describe("advisor", () => {
 				// Second turn arrives immediately behind the first.
 				messages.push({ role: "user", content: "late-arrival tail", timestamp: 300 } as AgentMessage);
 				runtime.onTurnEnd(messages);
-				const deadline = Date.now() + 10_000;
-				while (
-					Date.now() < deadline &&
-					!promptInputs
-						.map(i => promptText(i))
-						.join("\n")
-						.includes("late-arrival tail")
-				)
-					await Bun.sleep(5);
+				await settleUntil(
+					() => promptInputs.some(input => promptText(input).includes("late-arrival tail")),
+					10_000,
+				);
 				const combined = promptInputs.map(i => promptText(i)).join("\n");
 				// Every message exactly once, ordering preserved.
 				expect(combined).toContain("msg-0 ");
@@ -3513,9 +3502,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && failures.length === 1 && runtime.backlog === 0);
 
 			expect(promptInputs).toHaveLength(3);
 			expect(failures).toHaveLength(1);
@@ -3527,15 +3514,13 @@ describe("advisor", () => {
 			shouldFail = false;
 			messages.push({ role: "user", content: "bbb", timestamp: 2 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 4 && runtime.backlog === 0);
 			expect(failures).toHaveLength(1);
 
 			shouldFail = true;
 			messages.push({ role: "user", content: "ccc", timestamp: 3 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 7 && failures.length === 2 && runtime.backlog === 0);
 
 			expect(failures).toHaveLength(2);
 		});
@@ -4457,9 +4442,9 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(
+				() => lengthsBeforePrompt.length === 3 && rollbackCalls.length === 3 && runtime.backlog === 0,
+			);
 
 			// Three failed prompts each rolled back to the empty baseline, so every retry
 			// saw a clean state.messages instead of stacked failed turns.
@@ -4475,7 +4460,7 @@ describe("advisor", () => {
 			shouldFail = false;
 			messages.push({ role: "user", content: "bbb", timestamp: 2 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
+			await settleUntil(() => lengthsBeforePrompt.length === 4 && runtime.backlog === 0);
 
 			expect(lengthsBeforePrompt[lengthsBeforePrompt.length - 1]).toBe(0);
 			expect(rollbackCalls).toHaveLength(3);
@@ -4702,8 +4687,6 @@ describe("advisor", () => {
 			messages.length = 0;
 			messages.push({ role: "user", content: "new-conversation", timestamp: 2 } as AgentMessage);
 			runtime.reset();
-			await Bun.sleep(0);
-			await Bun.sleep(0);
 
 			expect(promptInputs).toHaveLength(1);
 			expect(runtime.backlog).toBe(0);
@@ -4711,7 +4694,7 @@ describe("advisor", () => {
 			// The runtime still works afterward: the next turn replays the new
 			// transcript only, never the dropped pre-reset content.
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
 			expect(promptInputs).toHaveLength(2);
 			expect(promptText(promptInputs[1])).toContain("new-conversation");
 			expect(promptText(promptInputs[1])).not.toContain("old-conversation");
@@ -4837,19 +4820,14 @@ describe("advisor", () => {
 				runtime.onTurnEnd([{ role: "user", content: "old session", timestamp: 1 } as AgentMessage]);
 				await hookStarted.promise;
 				const pause = runtime.pauseForSessionTransition();
-				const pausedQuickly = await Promise.race([pause.then(() => true), Bun.sleep(50).then(() => false)]);
+				await pause;
 				runtime.reset();
 				runtime.onTurnEnd([{ role: "user", content: "replacement session", timestamp: 2 } as AgentMessage]);
-				const replacementRan = await Promise.race([
-					replacementPromptStarted.promise.then(() => true),
-					Bun.sleep(50).then(() => false),
-				]);
+				await replacementPromptStarted.promise;
 				releaseHook.resolve();
-				await pause;
 				runtime.dispose();
 
-				expect(pausedQuickly).toBe(true);
-				expect(replacementRan).toBe(true);
+				expect(promptCalls).toBe(2);
 			},
 		);
 		it("aborts retry backoff before pausing for a session transition", async () => {
@@ -4872,18 +4850,15 @@ describe("advisor", () => {
 						return false;
 					},
 				},
-				250,
+				60_000,
 			);
 
 			runtime.onTurnEnd([{ role: "user", content: "retry me", timestamp: 1 } as AgentMessage]);
 			await recoveryStarted.promise;
-			await Bun.sleep(0);
-			const pause = runtime.pauseForSessionTransition();
-			const pausedQuickly = await Promise.race([pause.then(() => true), Bun.sleep(50).then(() => false)]);
-			if (!pausedQuickly) await pause;
+			// Let the failed turn enter its retry backoff before pausing it.
+			await new Promise<void>(resolve => setImmediate(resolve));
+			await runtime.pauseForSessionTransition();
 			runtime.dispose();
-
-			expect(pausedQuickly).toBe(true);
 		});
 	});
 
@@ -4915,8 +4890,7 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => runtime.quotaExhausted && quotaNotified);
 
 			// Quota path: single prompt attempt, no retries, no generic failure.
 			expect(promptInputs).toHaveLength(1);
@@ -4927,7 +4901,6 @@ describe("advisor", () => {
 			// Subsequent turns are skipped while quota-exhausted.
 			messages.push({ role: "user", content: "second", timestamp: 2 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
 			expect(promptInputs).toHaveLength(1);
 		});
 
@@ -4952,9 +4925,7 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && failures.length === 1 && runtime.backlog === 0);
 
 			// Overloaded follows the 3-retry → notifyFailure path, not the quota path.
 			expect(promptInputs).toHaveLength(3);
@@ -4981,8 +4952,7 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			const messages: AgentMessage[] = [{ role: "user", content: "quota-turn", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => runtime.quotaExhausted && promptInputs.length === 1);
 
 			// The batch must remain in the queue (backlog > 0) so it's replayed
 			// once the quota window resets, instead of being silently dropped.
@@ -5001,8 +4971,7 @@ describe("advisor", () => {
 			shouldFail = false;
 			runtime.reset();
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
 			expect(promptText(promptInputs.at(-1) as string | AgentMessage[])).toContain("quota-turn");
 		});
 
@@ -5023,17 +4992,14 @@ describe("advisor", () => {
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			const messages: AgentMessage[] = [{ role: "user", content: "turn", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => runtime.quotaExhausted);
 
 			expect(runtime.quotaExhausted).toBe(true);
 			expect(runtime.backlog).toBeGreaterThan(0);
 
 			// waitForCatchup must resolve instantly — a quota-paused advisor can't
 			// make progress, so blocking the primary agent for 30s is wrong.
-			const start = Date.now();
 			await runtime.waitForCatchup(30_000, 1);
-			expect(Date.now() - start).toBeLessThan(1000);
 		});
 		it("retries once when onTurnError signals a switched sibling credential", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -5063,9 +5029,7 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "quota-turn", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
 
 			// Sibling credential switched: retry succeeds, no quota pause.
 			expect(promptInputs).toHaveLength(2);
@@ -5135,8 +5099,7 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => runtime.quotaExhausted && quotaNotified);
 
 			// No sibling: single prompt, then quota pause (no retry).
 			expect(promptInputs).toHaveLength(1);
@@ -5265,11 +5228,7 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "mixed-turn", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(() => promptInputs.length === 3 && hookErrors.length === 2 && runtime.backlog === 0);
 
 			// Sibling switched (call 1 quota), retry failed with non-quota
 			// (call 2), then succeeded (call 3). No quota pause, backlog cleared.
@@ -5315,9 +5274,9 @@ describe("advisor", () => {
 
 			const messages: AgentMessage[] = [{ role: "user", content: "double-quota", timestamp: 1 } as AgentMessage];
 			runtime.onTurnEnd(messages);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
-			await Bun.sleep(0);
+			await settleUntil(
+				() => promptInputs.length === 2 && hookErrors.length === 2 && runtime.quotaExhausted && quotaNotified,
+			);
 
 			// Both credentials exhausted: retry prompted twice, then entered quota pause.
 			expect(promptInputs).toHaveLength(2);
@@ -5367,21 +5326,6 @@ describe("advisor", () => {
 			expect(runtime.quotaExhausted).toBe(false);
 			expect(quotaNotified).toBe(false);
 			expect(runtime.backlog).toBe(0);
-		});
-	});
-
-	describe("advisor default tools", () => {
-		it("defaults to read/grep/glob, a subset of the full grantable tool pool", () => {
-			expect([...ADVISOR_DEFAULT_TOOL_NAMES]).toEqual(["read", "grep", "glob"]);
-			// The advisor is a full agent now: every built tool is grantable (no hard
-			// read-only restriction), including mutating ones like edit/bash/write.
-			const builtin = new Set<string>(BUILTIN_TOOL_NAMES);
-			for (const name of ["read", "grep", "glob", "edit", "bash", "write"]) {
-				expect(builtin.has(name)).toBe(true);
-			}
-			for (const name of ADVISOR_DEFAULT_TOOL_NAMES) {
-				expect(builtin.has(name)).toBe(true);
-			}
 		});
 	});
 

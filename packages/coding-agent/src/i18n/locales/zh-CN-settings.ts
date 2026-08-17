@@ -1562,6 +1562,12 @@ export const settingsZhCN: Readonly<Record<string, string>> = {
 	"Doc 8on16, black": "Doc 8on16，黑色",
 	"Doc 8on16, sentence hues": "Doc 8on16，句子色调",
 	"Doc 8on16, sentence hues + dimmed stopwords": "Doc 8on16，句子色调 + 停用词变暗",
+	"External Thinking": "外部思考",
+	"Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning":
+		"私有草稿区，不向用户显示；启用后会关闭受支持的 GPT、Claude 和 Gemini 内置推理",
+	"Tool Call Handler Timeout (ms)": "工具调用处理器超时（毫秒）",
+	"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count":
+		"扩展 tool_call 处理器的有效工作超时时间，必须为有限正数；无效值使用 30000 毫秒，等待 OMP 自有对话框的时间不计入",
 	English: "英文",
 	"Use the English interface": "使用英文界面",
 	None: "无",

@@ -47,7 +47,9 @@ The custom template keeps these generated surfaces:
 - always-apply rules and the rulebook listing;
 - secret-redaction guidance when enabled.
 
-The separate project/environment footer remains and carries workstation data, deeper-directory context pointers, optional workspace information, current date/cwd, and the final completion requirements. Optional extra system blocks, such as computer-tool safety and active nested-repository context, also remain when applicable.
+The separate project/environment footer remains and carries workstation data, deeper-directory context pointers, optional workspace information, and the final completion requirements. Optional extra system blocks, such as computer-tool safety and active nested-repository context, also remain when applicable.
+
+The current date and working directory no longer live in the footer: they are emitted as a `<system-reminder>` block on the first user turn of each provider request (`date-cwd-reminder.md`). Keeping per-request bytes out of the system prompt lets open-weight providers (DeepSeek, Qwen, GLM, …) that render tool schemas after the system content keep their prefix cache, and lets a session crossing midnight refresh the date without rebuilding the prompt (#7404).
 
 What disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly.
 
@@ -79,7 +81,7 @@ on
 {{#if hasMemoryRoot}}Memory enabled.{{/if}}
 ```
 
-those characters reach the model literally. Internal values such as `cwd`, `date`, `skills`, `rules`, and `toolRefs` are private template implementation details, not a user templating API.
+those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` are private template implementation details, not a user templating API. The calendar date is deliberately not exposed as a template value anymore — it rides the per-request first-turn reminder instead (see above).
 
 ## Recipes
 

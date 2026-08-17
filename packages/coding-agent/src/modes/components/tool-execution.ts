@@ -734,10 +734,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * region (a later block streams below it), or — while it is still the
 	 * live tail — its head rows were committed because the frame outgrew the
 	 * viewport. Committed rows are immutable, so from that point every further
-	 * partial snapshot is dropped. Rows restyle static gray only when nothing
-	 * is committed yet; otherwise the bytes stay exactly as painted. One-way —
-	 * blocks never re-enter the live region. Returns whether the block is
-	 * frozen.
+	 * partial snapshot is dropped. A hidden, wholly uncommitted block keeps
+	 * accepting snapshots so revealing it starts from current progress. Rows
+	 * restyle static gray only when nothing is committed yet; otherwise the
+	 * bytes stay exactly as painted. One-way — blocks never re-enter the live
+	 * region. Returns whether the block is frozen.
 	 */
 	#maybeFreezeBackgroundTask(): boolean {
 		if (this.#backgroundTaskFrozen) return true;
@@ -745,7 +746,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const asyncState = (this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state;
 		if (asyncState !== "running") return false;
 		const uncommitted = this.#liveRegion.isBlockUncommitted?.(this) ?? true;
-		if (uncommitted && this.#liveRegion.isBlockInLiveRegion(this)) return false;
+		if (uncommitted && (!this.#toolActivityVisible || this.#liveRegion.isBlockInLiveRegion(this))) return false;
 		this.#backgroundTaskFrozen = true;
 		this.#updateSpinnerAnimation();
 		if (uncommitted) {
@@ -825,10 +826,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * Reports `false` while it can still visually change so the
 	 * {@link TranscriptContainer} keeps it inside the repaintable live region:
 	 * a foreground tool awaiting its result, or one streaming partial output.
+	 * Hidden blocks render no rows, so they cannot gate later streaming content.
+	 * Visibility toggles reset and replay the transcript before revealing them.
 	 * A final (non-partial) result, a background-async tool the agent has moved
-	 * past, or an explicit {@link seal} flips it to `true`.
+	 * past, or an explicit {@link seal} also flips it to `true`.
 	 */
 	isTranscriptBlockFinalized(): boolean {
+		if (!this.#toolActivityVisible) return true;
 		if (this.#sealed) return true;
 		if (this.#result === undefined) return false;
 		// A displaceable snapshot stays live: its rows are kept out of native

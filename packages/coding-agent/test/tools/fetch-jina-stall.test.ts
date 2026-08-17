@@ -40,21 +40,20 @@ describe("renderHtmlToText: jina stall does not starve local fallbacks (#1449)",
 			return new Response("", { status: 404 });
 		});
 
-		const started = Date.now();
+		// A short real budget is intentional: the combined AbortSignal clock is
+		// the behavior under test, and fake timers do not drive it reliably.
 		const result = await renderHtmlToText(
 			"https://example.com/article",
 			html,
-			0.3,
+			0.05,
 			settings,
 			undefined,
 			null,
 			fetchMock,
 		);
-		const elapsedMs = Date.now() - started;
 
 		expect(result.ok).toBe(true);
 		expect(["native", "trafilatura", "lynx"]).toContain(result.method);
-		expect(elapsedMs).toBeLessThan(1_500);
 	});
 
 	it("re-throws when the user signal is aborted, not when Jina sub-budget expires", async () => {

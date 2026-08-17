@@ -1,9 +1,22 @@
 [workspace]
-members = ["crates/pi-*", "crates/vendor/*"]
+# Explicit, not `crates/pi-*`: a glob member that resolves to a directory
+# without a Cargo.toml (a deleted crate whose dir survives `git reset --hard`
+# because an ignored file stayed behind) is a hard error that fails the whole
+# workspace, not a skipped entry.
+members = [
+   "crates/pi-ast",
+   "crates/pi-builtins",
+   "crates/pi-iso",
+   "crates/pi-natives",
+   "crates/pi-shell",
+   "crates/pi-voice",
+   "crates/pi-walker",
+   "crates/vendor/brush-core",
+]
 resolver = "3"
 
 [workspace.package]
-version = "17.2.13"
+version = "17.3.5"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
@@ -216,6 +229,7 @@ clap = { version = "4", features = ["derive"] }
 # ──────────────────────────────────────────────────────────────────────────────
 # Text Processing & Parsing
 # ──────────────────────────────────────────────────────────────────────────────
+pdf-inspector = "1"
 regex = "1"
 similar = "3.1.0"
 unicode-segmentation = "1.13"

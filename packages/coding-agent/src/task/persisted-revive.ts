@@ -79,10 +79,21 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		const subagentSettings = createSubagentSettings(
-			ctx.settings,
-			init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-		);
+		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
+		// advisor-role model, anything else = the explicit pattern stamped onto
+		// this session's `modelRoles.advisor`. Absent = unadvised (the
+		// createSubagentSettings default).
+		const subagentSettings = createSubagentSettings(ctx.settings, {
+			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(init.advisor
+				? {
+						"advisor.enabled": true,
+						...(init.advisor !== "on"
+							? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+							: undefined),
+					}
+				: undefined),
+		});
 		const persistedModelPattern =
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
@@ -144,12 +155,9 @@ export function createPersistedSubagentReviverFactory(
 			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
-			// Without it the idle-TTL timer never clears on a turn and the lifecycle
-			// could park the agent mid-run.
-			session.subscribe(event => {
-				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
-			});
+			// The internal run-state signal precedes deferrable public `agent_end`,
+			// keeping idle-TTL ownership synchronized even while prompts unwind.
+			registry.syncSessionStatus(ref.id, session);
 			// Persisted files predate an agent-source field, so cold-revived frames
 			// report the runtime-neutral `user` source; name comes from the ref.
 			const wakeAgent: AgentDefinition = {

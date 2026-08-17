@@ -6,7 +6,7 @@
 
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
@@ -15,6 +15,7 @@ import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelStringWithRouting,
+	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
@@ -492,6 +493,8 @@ export interface ExecutorOptions {
 	keepAlive?: boolean;
 	/** Internal ownership handoff for cleanup that outlives the visible Task result. */
 	onCleanupDeferred?: (completion: Promise<void>) => void;
+	/** Internal cleanup grace override for deterministic lifecycle tests. */
+	cleanupGraceMs?: number;
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -894,6 +897,9 @@ export function createSubagentSettings(
 			// the parent task approval is the authorization boundary. Use yolo mode
 			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
 			"tools.approvalMode": "yolo",
+			// Subagents run unadvised by default; runSubprocess opts a spawn back in
+			// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
+			"advisor.enabled": false,
 			...overrides,
 		},
 		{ storage: baseSettings.getStorage() },
@@ -1862,6 +1868,7 @@ async function driveSessionToYield(
 	monitor: SubagentRunMonitor,
 	task: string,
 ): Promise<DriveOutcome> {
+	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
 	let error: string | undefined;
@@ -2653,6 +2660,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -2690,12 +2698,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	// Per-agent advisor: the agent definition's `advisor` frontmatter or the
+	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
+	// pattern) pairs the spawned session with an advisor. Subagents default to
+	// no advisor (createSubagentSettings forces `advisor.enabled` off); an
+	// explicit model pattern lands on the child's `modelRoles.advisor` so role
+	// aliases and `:level` suffixes resolve inside the spawned session.
+	const advisorSelection = resolveAgentAdvisorSelection({
+		settingsOverride: settings.get("task.agentAdvisor")[agent.name],
+		agentAdvisor: agent.advisor,
+	});
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
+			...(advisorSelection ? { "advisor.enabled": true } : undefined),
+			...(advisorSelection?.model
+				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
+				: undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -2781,19 +2803,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
-	// Adopted (kept-alive) subagents flip registry status from session events on
-	// later turns: revive/wake → running, turn drained → idle. The subscription
-	// intentionally survives this run; a disposed session emits nothing, so it
-	// needs no teardown.
-	const installRegistryStatusSync = (target: AgentSession): void => {
-		target.subscribe(event => {
-			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running", target);
-			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle", target);
-			}
-		});
-	};
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
 			id,
@@ -3140,7 +3149,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			installRegistryStatusSync(session);
+			// Run-state notifications precede deferrable wire-level `agent_end`,
+			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
+			AgentRegistry.global().syncSessionStatus(id, session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -3156,7 +3167,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
-					installRegistryStatusSync(revived);
+					AgentRegistry.global().syncSessionStatus(id, revived);
 					installIrcWakeTurnMonitor(revived);
 					return revived;
 				};
@@ -3197,6 +3208,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -3309,7 +3321,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				error = err instanceof Error ? err.stack || err.message : String(err);
 			}
 		} finally {
-			const cleanupDeadlineAt = Date.now() + TASK_ABORT_CLEANUP_GRACE_MS;
+			const cleanupDeadlineAt = Date.now() + cleanupGraceMs;
 			const cleanupChangeStatus =
 				worktree === undefined
 					? "This task was not isolated, so its changes may remain in the working directory."
@@ -3320,8 +3332,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				lateCleanups.push(completion);
 				exitCode = 1;
 				aborted = true;
-				abortReasonText = `cleanup exceeded ${TASK_ABORT_CLEANUP_GRACE_MS} ms`;
-				error ??= `Task aborted. Cleanup did not finish within ${TASK_ABORT_CLEANUP_GRACE_MS} ms. ${cleanupChangeStatus}`;
+				abortReasonText = `cleanup exceeded ${cleanupGraceMs} ms`;
+				error ??= `Task aborted. Cleanup did not finish within ${cleanupGraceMs} ms. ${cleanupChangeStatus}`;
 			};
 			if (abortSignal.aborted) {
 				aborted = monitor.isAbortedRun();

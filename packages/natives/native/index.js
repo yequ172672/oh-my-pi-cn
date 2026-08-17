@@ -29,7 +29,7 @@ export const Shell = nativeBindings.Shell;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV17_2_13 = nativeBindings.__piNativesV17_2_13;
+export const __piNativesV17_3_5 = nativeBindings.__piNativesV17_3_5;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
@@ -69,6 +69,7 @@ export const matchesLegacySequence = nativeBindings.matchesLegacySequence;
 export const mmrRerankIndices = nativeBindings.mmrRerankIndices;
 export const parseKey = nativeBindings.parseKey;
 export const parseKittySequence = nativeBindings.parseKittySequence;
+export const pdfToMarkdown = nativeBindings.pdfToMarkdown;
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard;
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng;
 export const search = nativeBindings.search;

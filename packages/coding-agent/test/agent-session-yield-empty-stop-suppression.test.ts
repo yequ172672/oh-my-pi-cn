@@ -7,8 +7,7 @@
  * already-yielded child resumes and can enter post-yield retries or tool calls
  * (see issues #3389 and #4963).
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -16,16 +15,23 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const yieldToolSchema = type({ result: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
 
-type Harness = { session: AgentSession; authStorage: AuthStorage; tempDir: TempDir };
+type Harness = { session: AgentSession; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
+const sharedAuthStorage = createInMemoryAuthStorage();
+sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+
+afterAll(() => {
+	sharedAuthStorage.close();
+});
 
 const yieldTool: AgentTool<typeof yieldToolSchema, { value: unknown }> = {
 	name: "yield",
@@ -78,11 +84,9 @@ function emptyStop(): MockResponse {
 
 async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-yield-empty-stop-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
-	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -113,7 +117,7 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, authStorage, tempDir };
+	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
 }
@@ -140,7 +144,6 @@ function assistantText(messages: AgentMessage[]): string {
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
-		harness.authStorage.close();
 		harness.tempDir.removeSync();
 	}
 	vi.restoreAllMocks();

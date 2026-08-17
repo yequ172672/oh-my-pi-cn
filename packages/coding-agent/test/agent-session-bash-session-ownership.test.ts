@@ -9,10 +9,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const bashResult = {
 	output: "old-output",
@@ -31,9 +31,9 @@ describe("AgentSession bash session ownership", () => {
 	let session: AgentSession;
 	let additionalManagers: SessionManager[];
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-bash-session-owner-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		additionalManagers = [];
 	});

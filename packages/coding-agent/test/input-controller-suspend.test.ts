@@ -30,6 +30,7 @@ function createCtx(): SuspendCtx {
 }
 
 const originalPlatform = process.platform;
+let sigcontListener: (() => void) | undefined;
 
 function setPlatform(value: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", { value, configurable: true, writable: true });
@@ -37,10 +38,9 @@ function setPlatform(value: NodeJS.Platform): void {
 
 afterEach(() => {
 	Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+	if (sigcontListener) process.removeListener("SIGCONT", sigcontListener);
+	sigcontListener = undefined;
 	vi.restoreAllMocks();
-	// Drop any SIGCONT listener a passing test left behind so a later test
-	// (or the next file) doesn't get spurious callbacks.
-	process.removeAllListeners("SIGCONT");
 });
 
 describe("InputController.handleCtrlZ", () => {
@@ -88,9 +88,9 @@ describe("InputController.handleCtrlZ", () => {
 		expect(showError).not.toHaveBeenCalled();
 
 		// Simulating the kernel-delivered SIGCONT drives the TUI back up.
-		const resume = onceSpy.mock.calls.find(([sig]) => sig === "SIGCONT")?.[1] as (() => void) | undefined;
-		expect(resume).toBeDefined();
-		resume?.();
+		sigcontListener = onceSpy.mock.calls.find(([sig]) => sig === "SIGCONT")?.[1] as (() => void) | undefined;
+		expect(sigcontListener).toBeDefined();
+		sigcontListener?.();
 		expect(ui.start).toHaveBeenCalledTimes(1);
 		expect(ui.requestRender).toHaveBeenCalledWith(true);
 	});
@@ -113,9 +113,9 @@ describe("InputController.handleCtrlZ", () => {
 		// The exact listener we registered for SIGCONT is the one we
 		// remove; otherwise a leaked handler would fire on the next
 		// unrelated continue and re-`start()` an already-running TUI.
-		const registered = onceSpy.mock.calls.find(([sig]) => sig === "SIGCONT")?.[1];
-		expect(registered).toBeDefined();
-		expect(removeSpy).toHaveBeenCalledWith("SIGCONT", registered);
+		sigcontListener = onceSpy.mock.calls.find(([sig]) => sig === "SIGCONT")?.[1] as (() => void) | undefined;
+		expect(sigcontListener).toBeDefined();
+		expect(removeSpy).toHaveBeenCalledWith("SIGCONT", sigcontListener);
 
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(ui.stop).toHaveBeenCalledTimes(1);

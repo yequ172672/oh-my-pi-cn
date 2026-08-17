@@ -5,6 +5,96 @@
 ### Added
 
 - Added a local-only Codex CLI login bridge that reuses the installed Codex app-server's current ChatGPT access token while leaving refresh-token storage and rotation entirely under Codex ownership.
+## [17.3.5] - 2026-08-16
+
+### Added
+
+- Added retryable oneshot completion support (`retryTransientCompletion`) so non-agent LLM calls correctly retry on transient provider failures (Anthropic overload/rate-limit errors, HTTP 429/500/502/503/529), honoring provider-supplied retry-after timing before giving up.
+
+### Fixed
+
+- Fixed xAI availability detection so paid-key-only setups correctly default to `xai/grok-4.5` instead of the free SuperGrok catalog; explicit `xai-oauth/…` selectors still work as before.
+- Fixed xAI Responses requests sending unsupported parameters (reasoning summary, presence/frequency penalties) that some models rejected.
+- Fixed Umans usage reporting incorrectly marking quota as exhausted based on raw request counts instead of actual weighted usage, and improved the usage display to show both a soft-cap warning and a hard exhaustion limit with an accurate countdown to reset.
+- Fixed `omp usage invalidate` to fully clear stale usage data and force a fresh refresh, so upgraded subscriptions no longer show outdated quota information.
+- Improved session recovery to correctly treat certain Cursor HTTP/2 connection errors as transient instead of ending the session.
+- Fixed OpenAI-compatible streams (e.g. DeepSeek) that are cut off mid-generation being silently treated as a completed response instead of being retried.
+- Fixed DeepSeek resource-exhaustion interruptions not being automatically retried.
+- Fixed tool-call IDs being lost during same-model replay, which could break correlation with custom gateways.
+- Fixed Kimi Code multi-account routing to prefer accounts with more available quota, respect usage-limit cooldowns, and keep consistent usage history across token refreshes.
+- Fixed Anthropic custom signing-proxy conversations losing tool-search results and thinking content during replay.
+- Fixed rare runaway response loops across model providers so they now fail gracefully instead of repeating indefinitely.
+- Fixed xAI rejecting entire turns due to certain MCP tool schema shapes, restoring compatibility while isolating any remaining incompatible tools rather than failing the whole request.
+- Fixed Alibaba DashScope/Bailian transient per-minute rate limits being misclassified as full quota exhaustion, causing unnecessary long backoffs instead of quick retries.
+- Fixed Anthropic-compatible streams dropping thinking content, which broke replay of prior reasoning.
+- Updated the Alibaba Coding Plan China login flow to point to the current Bailian API-key management console.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
+- Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Distinguished Gemini thought-only `STOP` responses from empty transports, avoiding repeated identical reasoning requests and duplicate Antigravity endpoint streams while surfacing the missing final output for session-level recovery.
+
+## [17.3.2] - 2026-08-13
+
+### Fixed
+
+- Dropped unsigned thinking blocks from Antigravity Claude requests instead of sending them without a signature, preventing HTTP 400 responses when resuming sessions or switching models.
+- Classified Antigravity HTTP 429 responses from structured `google.rpc.ErrorInfo` reasons (`QUOTA_EXHAUSTED`, `RATE_LIMIT_EXCEEDED`, and `INSUFFICIENT_G1_CREDITS_BALANCE`), using retry delays of five minutes or longer to distinguish rotatable quota windows from transient throttling instead of relying only on message regexes.
+
+### Removed
+
+- Removed the Antigravity identity-prompt injection (`ANTIGRAVITY_SYSTEM_INSTRUCTION` and `shouldInjectAntigravitySystemInstruction`): Cloud Code Assist accepts arbitrary system instructions on gemini-3.x and Claude routes (verified live), and the injected stub never matched the real client's system prompt anyway. User system prompts are now sent unmodified (still tagged `role: "user"`).
+- Fixed Antigravity `auto` mode not failing over to the sandbox endpoint when the daily endpoint returned a thinking-only `STOP`, which caused Advisor turns to be falsely recorded as empty-response failures ([#8480](https://github.com/can1357/oh-my-pi/issues/8480)).
+
+## [17.3.0] - 2026-08-13
+
+### Breaking Changes
+
+- Renamed `withGeminiThinkingLoopGuard` to `withThinkingLoopGuard`; the guard applies to Gemini, DeepSeek, and Grok model-id families.
+
+### Changed
+
+- Updated OpenCode Go integration to use the official usage endpoint, removing hardcoded caps, enabling real-time credential validation, and routing multi-key pools based on rolling and weekly headroom.
+- Optimized Anthropic prompt caching with rolling 5-minute breakpoints and idle refreshes to keep the prompt prefix warm.
+
+### Fixed
+
+- Fixed Ollama chat adapter to correctly forward sampling parameters like temperature and topP to the provider.
+- Fixed OpenAI agent turns ending prematurely after a web search with no visible answer, ensuring the agent continues processing the search results.
+- Fixed a resource leak where completed model streams retained provider concurrency permits longer than necessary.
+- Fixed image input support for qwen3.8-max and newer models when using DashScope compatible-mode.
+- Fixed xAI usage reporting falling back to a stale cache when a new weekly cycle starts with 0% consumed credits.
+- Fixed Together AI login validation failures by querying the authenticated models list instead of a hardcoded model.
+- Fixed credential-health probes and usage fetches failing when using reference-stored API keys (such as environment variables or commands) by ensuring secrets are correctly resolved.
+- Fixed Perplexity email-OTP login by preserving the session cookies required for verification.
+- Fixed thinking configuration for OpenAI and Daybreak models to correctly send reasoning.effort: "none" when thinking is disabled.
+- Fixed Grok runaway thinking streams bypassing the thinking-loop guard.
+
+### Removed
+
+- Removed legacy local request-cost estimation machinery and database schemas previously used for OpenCode Go estimates.
+
+## [17.2.15] - 2026-08-12
+
+### Fixed
+
+- Fixed an issue where AWS_BEDROCK_SKIP_AUTH failed to expose Amazon Bedrock models when AWS credential files were unavailable.
+- Fixed an issue where forceReasoningOff was ignored by Anthropic and Google transports, which allowed native thinking alongside a caller-supplied external scratchpad.
+
+## [17.2.14] - 2026-08-11
+
+### Added
+
+- Added `forceReasoningOff` and `disableReasoning` options to disable reasoning in OpenAI and Azure OpenAI models
+
 ## [17.2.13] - 2026-08-11
 
 ### Changed

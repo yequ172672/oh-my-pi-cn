@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -64,6 +64,7 @@ function createSession(
 	settings = Settings.isolated(),
 	options: CreateSessionOptions = {},
 ): ToolSession {
+	settings.set("images.autoResize", false);
 	const availableModels = options.availableModels ?? [model];
 	const activeModel = options.activeModel ?? model;
 	if (options.configureVisionRole !== false) {
@@ -163,19 +164,19 @@ function createCompleteSimpleHangingStub(): CompleteSimpleStub {
 
 describe("InspectImageTool", () => {
 	let testDir: string;
+	let imagePath: string;
 
-	beforeEach(() => {
+	beforeAll(() => {
 		testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-inspect-image-"));
+		imagePath = path.join(testDir, "screen.png");
+		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 	});
 
-	afterEach(() => {
+	afterAll(() => {
 		removeSyncWithRetries(testDir);
 	});
 
 	it("sends image and question to completeSimple and returns text-only result", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Detected text: Settings");
 		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		const result = await tool.execute("call-1", {
@@ -197,9 +198,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("passes the vision role's configured thinking effort into the oneshot", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const settings = Settings.isolated();
 		settings.setModelRole("vision", `${reasoningVisionModel.provider}/${reasoningVisionModel.id}:high`);
 
@@ -343,9 +341,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("sends question text unchanged", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Looks clear");
 		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		await tool.execute("call-1b", { path: imagePath, question: "What warning is shown?" });
@@ -405,9 +400,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("fails when images.blockImages is enabled", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleForbiddenStub();
 		const settings = Settings.isolated({ "images.blockImages": true });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
@@ -419,9 +411,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("falls back to @default when vision role is unset", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${visionModel.provider}/${visionModel.id}`);
 
@@ -443,9 +432,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("fails with actionable error when resolved model does not support image input", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(createSession(testDir, textOnlyModel), stub.fn);
 
@@ -456,9 +442,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("fails with actionable error when API key is missing", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(createSession(testDir, visionModel, ""), stub.fn);
 
@@ -469,42 +452,40 @@ describe("InspectImageTool", () => {
 	});
 
 	it("times out with a configured error when the vision-model call stalls", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleHangingStub();
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 50 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
+		const timeoutController = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(timeoutMs => {
+			expect(timeoutMs).toBe(50);
+			queueMicrotask(() => timeoutController.abort());
+			return timeoutController.signal;
+		});
 
-		const start = Date.now();
-		await expect(tool.execute("call-timeout", { path: imagePath, question: "Anything?" })).rejects.toThrow(
-			/inspect_image request timed out.*inspect_image\.timeoutMs.*50ms/,
-		);
-		const elapsed = Date.now() - start;
-		expect(elapsed).toBeLessThan(5000);
+		try {
+			await expect(tool.execute("call-timeout", { path: imagePath, question: "Anything?" })).rejects.toThrow(
+				/inspect_image request timed out.*inspect_image\.timeoutMs.*50ms/,
+			);
+		} finally {
+			timeoutSpy.mockRestore();
+		}
 		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("surfaces manual abort as aborted, not as timed out", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleHangingStub();
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 60_000 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
 		const controller = new AbortController();
 
 		const pending = tool.execute("call-manual-abort", { path: imagePath, question: "Anything?" }, controller.signal);
-		setTimeout(() => controller.abort(), 25);
+		queueMicrotask(() => controller.abort());
 		await expect(pending).rejects.toThrow(/inspect_image request aborted/);
 		await expect(pending).rejects.not.toThrow(/timed out/);
 		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("skips the timeout guard when inspect_image.timeoutMs is zero", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Timeout disabled path");
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 0 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);

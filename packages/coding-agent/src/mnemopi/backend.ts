@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
-import { type ApiKeyResolver, completeSimple } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
@@ -545,16 +545,18 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
-				const message = await completeSimple(
-					model,
-					{
-						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-					},
-					{
-						apiKey: modelRegistry.resolver(model, sessionId),
-						maxTokens: opts?.maxTokens,
-						temperature: opts?.temperature,
-					},
+				const message = await retryTransientCompletion(() =>
+					completeSimple(
+						model,
+						{
+							messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+						},
+						{
+							apiKey: modelRegistry.resolver(model, sessionId),
+							maxTokens: opts?.maxTokens,
+							temperature: opts?.temperature,
+						},
+					),
 				);
 				return message.content
 					.filter(

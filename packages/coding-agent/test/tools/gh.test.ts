@@ -100,11 +100,11 @@ interface PrFixture {
 	otherRefOid: string;
 }
 
-// Building the fixture costs ~16 real `git` subprocess spawns (~200ms). Six
-// tests need it, so we build it ONCE as an immutable template in `beforeAll`
-// and materialize per-test copies via `fs.cp` (~12ms). Each copy is a fully
-// independent repo tree, so the mutating tests (worktree checkout, config
-// writes, extra branches) can't contaminate each other.
+// Building the fixture is the dominant setup cost in this file. Build one
+// immutable template in `beforeAll`, using bare clones instead of repeatedly
+// pushing each branch, then materialize independent per-test copies via `fs.cp`.
+// Each copy is an independent repo tree, so mutating tests cannot contaminate
+// one another.
 let prFixtureTemplate: PrFixture | null = null;
 
 async function buildPrFixtureTemplate(): Promise<PrFixture> {
@@ -115,38 +115,32 @@ async function buildPrFixtureTemplate(): Promise<PrFixture> {
 	const headRefName = "feature/contributor-fix";
 
 	await fs.mkdir(repoRoot, { recursive: true });
-	runGit(baseDir, ["init", "--bare", originBare]);
-	runGit(baseDir, ["init", "--bare", forkBare]);
 	runGit(baseDir, ["init", "-b", "main", repoRoot]);
-	runGit(repoRoot, ["config", "user.name", "Test User"]);
-	runGit(repoRoot, ["config", "user.email", "test@example.com"]);
 	await fs.writeFile(path.join(repoRoot, "README.md"), "base\n");
 	runGit(repoRoot, ["add", "README.md"]);
 	runGit(repoRoot, ["commit", "-m", "base commit"]);
-	runGit(repoRoot, ["remote", "add", "origin", originBare]);
-	runGit(repoRoot, ["push", "-u", "origin", "main"]);
-	runGit(repoRoot, ["remote", "add", "forksrc", forkBare]);
+
 	runGit(repoRoot, ["checkout", "-b", headRefName]);
 	await fs.writeFile(path.join(repoRoot, "README.md"), "base\nfeature\n");
-	runGit(repoRoot, ["add", "README.md"]);
-	runGit(repoRoot, ["commit", "-m", "feature commit"]);
-	const headRefOid = runGit(repoRoot, ["rev-parse", "HEAD"]);
-	runGit(repoRoot, ["push", "-u", "forksrc", headRefName]);
-	// Same-repo PR checkouts fetch the head branch from `origin`, so publish the
-	// contributor branch there too — the array-checkout test's PR #100 uses it.
-	runGit(repoRoot, ["push", "origin", `${headRefName}:${headRefName}`]);
-	runGit(repoRoot, ["checkout", "main"]);
+	runGit(repoRoot, ["commit", "-am", "feature commit"]);
+	const headRefOid = (await fs.readFile(path.join(repoRoot, ".git", "refs", "heads", headRefName), "utf8")).trim();
 
-	// A second origin branch lets the array-checkout test prove the multi-PR loop
-	// with two distinct PRs without paying for any per-test git setup.
 	const otherRefName = "feature/another";
 	runGit(repoRoot, ["checkout", "-b", otherRefName, "main"]);
 	await fs.writeFile(path.join(repoRoot, "OTHER.md"), "other\n");
 	runGit(repoRoot, ["add", "OTHER.md"]);
 	runGit(repoRoot, ["commit", "-m", "another commit"]);
-	const otherRefOid = runGit(repoRoot, ["rev-parse", "HEAD"]);
-	runGit(repoRoot, ["push", "-u", "origin", otherRefName]);
+	const otherRefOid = (await fs.readFile(path.join(repoRoot, ".git", "refs", "heads", otherRefName), "utf8")).trim();
 	runGit(repoRoot, ["checkout", "main"]);
+
+	// Local bare clones copy every prepared branch in one process each. The old
+	// setup initialized both remotes and then paid a separate push for main and
+	// every feature branch.
+	runGit(baseDir, ["clone", "--bare", repoRoot, originBare]);
+	runGit(baseDir, ["clone", "--bare", repoRoot, forkBare]);
+	runGit(repoRoot, ["remote", "add", "origin", originBare]);
+	runGit(repoRoot, ["remote", "add", "forksrc", forkBare]);
+	runGit(repoRoot, ["fetch", "origin"]);
 
 	return { baseDir, repoRoot, originBare, forkBare, headRefName, headRefOid, otherRefName, otherRefOid };
 }
@@ -976,7 +970,7 @@ describe("github tool", () => {
 		expect(apiArgs).toContain("q=fix repo:other/project");
 	});
 
-	describe("pr_checkout (single, cross-repository)", () => {
+	describe("pr_checkout (single, cross-repository) and git remote handling", () => {
 		// Arrange the mutable fixture + isolated $HOME once in beforeAll (excluded
 		// from test-body time); the body only performs the checkout and assertions.
 		let fixture: PrFixture;
@@ -1026,43 +1020,34 @@ describe("github tool", () => {
 			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).toContain(`worktree ${worktreePath}`);
 			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
 		});
-	});
 
-	// Both assertions are non-mutating (a no-op add and a rejected add), so they
-	// share one immutable fixture instead of cloning one per test.
-	describe("git.remote.add idempotency", () => {
-		let remoteFixture: PrFixture;
-		beforeAll(async () => {
-			remoteFixture = await createPrFixture();
-		});
-		afterAll(async () => {
-			await removeWithRetries(remoteFixture.baseDir);
-		});
+		// These assertions are non-mutating (a no-op add and rejected adds), so
+		// reuse the checkout fixture instead of cloning another repository.
+		describe("git.remote.add idempotency", () => {
+			it("treats git.remote.add as a no-op when the remote already exists with the same URL", async () => {
+				await git.remote.add(fixture.repoRoot, "forksrc", fixture.forkBare);
+				expect(runGit(fixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(fixture.forkBare);
+			});
 
-		it("treats git.remote.add as a no-op when the remote already exists with the same URL", async () => {
-			await git.remote.add(remoteFixture.repoRoot, "forksrc", remoteFixture.forkBare);
-			expect(runGit(remoteFixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(remoteFixture.forkBare);
-		});
-
-		it("rejects git.remote.add when the remote already exists with a different URL", async () => {
-			await expect(git.remote.add(remoteFixture.repoRoot, "forksrc", remoteFixture.originBare)).rejects.toThrow(
-				/already exists with URL/,
-			);
-			// Existing URL is preserved — we never overwrote it.
-			expect(runGit(remoteFixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(remoteFixture.forkBare);
-		});
-		it("does not depend on localized git remote-add stderr for existing remotes", async () => {
-			// The shim is a bash script resolved via `which`; neither exists on Windows.
-			if (process.platform === "win32") return;
-			const originalPath = process.env.PATH;
-			const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-"));
-			const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
-			expect(realGitResult.exitCode).toBe(0);
-			const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
-			const fakeGit = path.join(fakeBin, "git");
-			await fs.writeFile(
-				fakeGit,
-				`#!/usr/bin/env bash
+			it("rejects git.remote.add when the remote already exists with a different URL", async () => {
+				await expect(git.remote.add(fixture.repoRoot, "forksrc", fixture.originBare)).rejects.toThrow(
+					/already exists with URL/,
+				);
+				// Existing URL is preserved — we never overwrote it.
+				expect(runGit(fixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(fixture.forkBare);
+			});
+			it("does not depend on localized git remote-add stderr for existing remotes", async () => {
+				// The shim is a bash script resolved via `which`; neither exists on Windows.
+				if (process.platform === "win32") return;
+				const originalPath = process.env.PATH;
+				const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-"));
+				const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
+				expect(realGitResult.exitCode).toBe(0);
+				const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
+				const fakeGit = path.join(fakeBin, "git");
+				await fs.writeFile(
+					fakeGit,
+					`#!/usr/bin/env bash
 while [[ "$1" == "-c" ]]; do shift 2; done
 if [[ "$1" == "remote" && "$2" == "add" && "$3" == "forksrc" ]]; then
 	echo "本地化错误：远程 forksrc 已经存在。" >&2
@@ -1070,40 +1055,40 @@ if [[ "$1" == "remote" && "$2" == "add" && "$3" == "forksrc" ]]; then
 fi
 exec ${JSON.stringify(realGit)} "$@"
 `,
-			);
-			await fs.chmod(fakeGit, 0o755);
+				);
+				await fs.chmod(fakeGit, 0o755);
 
-			try {
-				process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-				await git.remote.add(remoteFixture.repoRoot, "forksrc", remoteFixture.forkBare);
-			} finally {
-				if (originalPath === undefined) {
-					delete process.env.PATH;
-				} else {
-					process.env.PATH = originalPath;
+				try {
+					process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+					await git.remote.add(fixture.repoRoot, "forksrc", fixture.forkBare);
+				} finally {
+					if (originalPath === undefined) {
+						delete process.env.PATH;
+					} else {
+						process.env.PATH = originalPath;
+					}
+					await removeWithRetries(fakeBin);
 				}
-				await removeWithRetries(fakeBin);
-			}
-		});
+			});
 
-		it("pins Git messages while preserving UTF-8 character locale", async () => {
-			if (process.platform === "win32") return;
-			const originalPath = process.env.PATH;
-			const originalLocale = {
-				EXPECTED_LC_CTYPE: process.env.EXPECTED_LC_CTYPE,
-				LANG: process.env.LANG,
-				LC_ALL: process.env.LC_ALL,
-				LC_CTYPE: process.env.LC_CTYPE,
-				LC_MESSAGES: process.env.LC_MESSAGES,
-			};
-			const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-locale-"));
-			const realGit = $which("git");
-			expect(realGit).not.toBeNull();
-			if (realGit === null) return;
-			const fakeGit = path.join(fakeBin, "git");
-			await fs.writeFile(
-				fakeGit,
-				`#!/bin/sh
+			it("pins Git messages while preserving UTF-8 character locale", async () => {
+				if (process.platform === "win32") return;
+				const originalPath = process.env.PATH;
+				const originalLocale = {
+					EXPECTED_LC_CTYPE: process.env.EXPECTED_LC_CTYPE,
+					LANG: process.env.LANG,
+					LC_ALL: process.env.LC_ALL,
+					LC_CTYPE: process.env.LC_CTYPE,
+					LC_MESSAGES: process.env.LC_MESSAGES,
+				};
+				const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-locale-"));
+				const realGit = $which("git");
+				expect(realGit).not.toBeNull();
+				if (realGit === null) return;
+				const fakeGit = path.join(fakeBin, "git");
+				await fs.writeFile(
+					fakeGit,
+					`#!/bin/sh
 if [ "\${LC_MESSAGES-}" != "C" ]; then
 	echo "LC_MESSAGES was \${LC_MESSAGES-<unset>}" >&2
 	exit 41
@@ -1118,44 +1103,45 @@ if [ "\${LC_ALL+x}" = "x" ]; then
 fi
 exec ${JSON.stringify(realGit)} "$@"
 `,
-			);
-			await fs.chmod(fakeGit, 0o755);
+				);
+				await fs.chmod(fakeGit, 0o755);
 
-			try {
-				process.env.PATH = fakeBin;
-				process.env.EXPECTED_LC_CTYPE = "C.UTF-8";
-				process.env.LC_ALL = "C.UTF-8";
-				delete process.env.LANG;
-				process.env.LC_CTYPE = "";
-				delete process.env.LC_MESSAGES;
-				await git.diff(remoteFixture.repoRoot, { env: { LC_MESSAGES: undefined } });
+				try {
+					process.env.PATH = fakeBin;
+					process.env.EXPECTED_LC_CTYPE = "C.UTF-8";
+					process.env.LC_ALL = "C.UTF-8";
+					delete process.env.LANG;
+					process.env.LC_CTYPE = "";
+					delete process.env.LC_MESSAGES;
+					await git.diff(fixture.repoRoot, { env: { LC_MESSAGES: undefined } });
 
-				process.env.EXPECTED_LC_CTYPE = "fr_FR.UTF-8";
-				process.env.LC_ALL = "fr_FR.UTF-8";
-				process.env.LC_CTYPE = "C";
-				process.env.LC_MESSAGES = "fr_FR.UTF-8";
-				await git.diff(remoteFixture.repoRoot, { env: { LC_MESSAGES: undefined } });
+					process.env.EXPECTED_LC_CTYPE = "fr_FR.UTF-8";
+					process.env.LC_ALL = "fr_FR.UTF-8";
+					process.env.LC_CTYPE = "C";
+					process.env.LC_MESSAGES = "fr_FR.UTF-8";
+					await git.diff(fixture.repoRoot, { env: { LC_MESSAGES: undefined } });
 
-				process.env.EXPECTED_LC_CTYPE = "UTF-8-SENTINEL";
-				process.env.LC_ALL = "fr_FR.UTF-8";
-				process.env.LC_CTYPE = "UTF-8-SENTINEL";
-				process.env.LC_MESSAGES = "fr_FR.UTF-8";
-				await git.diff(remoteFixture.repoRoot, { env: { LC_ALL: "C", LC_MESSAGES: undefined } });
-			} finally {
-				if (originalPath === undefined) {
-					delete process.env.PATH;
-				} else {
-					process.env.PATH = originalPath;
-				}
-				for (const [key, value] of Object.entries(originalLocale)) {
-					if (value === undefined) {
-						delete process.env[key];
+					process.env.EXPECTED_LC_CTYPE = "UTF-8-SENTINEL";
+					process.env.LC_ALL = "fr_FR.UTF-8";
+					process.env.LC_CTYPE = "UTF-8-SENTINEL";
+					process.env.LC_MESSAGES = "fr_FR.UTF-8";
+					await git.diff(fixture.repoRoot, { env: { LC_ALL: "C", LC_MESSAGES: undefined } });
+				} finally {
+					if (originalPath === undefined) {
+						delete process.env.PATH;
 					} else {
-						process.env[key] = value;
+						process.env.PATH = originalPath;
 					}
+					for (const [key, value] of Object.entries(originalLocale)) {
+						if (value === undefined) {
+							delete process.env[key];
+						} else {
+							process.env[key] = value;
+						}
+					}
+					await removeWithRetries(fakeBin);
 				}
-				await removeWithRetries(fakeBin);
-			}
+			});
 		});
 	});
 
@@ -1258,8 +1244,8 @@ echo ok
 		}
 	});
 
-	describe("pr_checkout (array of pull requests)", () => {
-		// Same beforeAll-hoisted arrange: the body only runs the array checkout.
+	describe("pr_checkout arrays and pr_push metadata", () => {
+		// One mutable fixture covers disjoint branches and worktrees for both contracts.
 		let fixture: PrFixture;
 		let tempHome: TempHome;
 		beforeAll(async () => {
@@ -1319,34 +1305,34 @@ echo ok
 			expect(summaries?.map(s => s.prNumber)).toEqual([100, 200]);
 			expect(summaries?.every(s => s.reused === false)).toBe(true);
 		}, 30_000);
-	});
 
-	describe("pr_push without checkout metadata", () => {
-		// Arrange a branch carrying an unpushed commit (so a stray push WOULD move
-		// origin) but no pr_checkout metadata — all in beforeAll, out of body time.
-		let fixture: PrFixture;
-		let originMainBefore: string;
-		beforeAll(async () => {
-			fixture = await createPrFixture();
-			originMainBefore = runGit(fixture.baseDir, ["--git-dir", fixture.originBare, "rev-parse", "refs/heads/main"]);
-			runGit(fixture.repoRoot, ["checkout", "-b", "manual-branch", "origin/main"]);
-			await Bun.write(path.join(fixture.repoRoot, "README.md"), "base\nmanual\n");
-			runGit(fixture.repoRoot, ["add", "README.md"]);
-			runGit(fixture.repoRoot, ["commit", "-m", "manual branch commit"]);
-		});
-		afterAll(async () => {
-			await removeWithRetries(fixture.baseDir);
-		});
+		describe("pr_push without checkout metadata", () => {
+			// Arrange a branch carrying an unpushed commit (so a stray push WOULD
+			// move origin) but no pr_checkout metadata.
+			let originMainBefore: string;
+			beforeAll(async () => {
+				originMainBefore = runGit(fixture.baseDir, [
+					"--git-dir",
+					fixture.originBare,
+					"rev-parse",
+					"refs/heads/main",
+				]);
+				runGit(fixture.repoRoot, ["checkout", "-b", "manual-branch", "origin/main"]);
+				await Bun.write(path.join(fixture.repoRoot, "README.md"), "base\nmanual\n");
+				runGit(fixture.repoRoot, ["add", "README.md"]);
+				runGit(fixture.repoRoot, ["commit", "-m", "manual branch commit"]);
+			});
 
-		it("rejects PR pushes from branches without checkout metadata", async () => {
-			const tool = new GithubTool(createSession(fixture.repoRoot));
-			await expect(tool.execute("pr-push", { op: "pr_push" })).rejects.toThrow(
-				"branch manual-branch has no PR push metadata; check it out via op: pr_checkout first",
-			);
-			// The rejection happened before any push: origin's main is untouched.
-			expect(runGit(fixture.baseDir, ["--git-dir", fixture.originBare, "rev-parse", "refs/heads/main"])).toBe(
-				originMainBefore,
-			);
+			it("rejects PR pushes from branches without checkout metadata", async () => {
+				const tool = new GithubTool(createSession(fixture.repoRoot));
+				await expect(tool.execute("pr-push", { op: "pr_push" })).rejects.toThrow(
+					"branch manual-branch has no PR push metadata; check it out via op: pr_checkout first",
+				);
+				// The rejection happened before any push: origin's main is untouched.
+				expect(runGit(fixture.baseDir, ["--git-dir", fixture.originBare, "rev-parse", "refs/heads/main"])).toBe(
+					originMainBefore,
+				);
+			});
 		});
 	});
 

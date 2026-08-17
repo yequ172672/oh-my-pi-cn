@@ -109,6 +109,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 	});
 
+	const requireBundledModel = (provider: "anthropic" | "google" | "openai" | "xai", id: string): Model => {
+		const bundled = getBundledModel(provider, id);
+		if (!bundled) throw new Error(`Expected ${provider}/${id} model to exist`);
+		return bundled;
+	};
+
 	afterEach(() => {
 		for (const tempDir of tempDirs.splice(0)) {
 			removeSyncWithRetries(tempDir);
@@ -144,6 +150,182 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.systemPrompt.join("\n")).not.toContain("default_inactive_tool");
 		} finally {
 			await session.dispose();
+		}
+	});
+
+	it("activates the private think tool when external thinking is enabled at runtime", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: requireBundledModel("openai", "gpt-5"),
+			settings,
+		});
+
+		try {
+			expect(session.getToolByName("think")).toBeUndefined();
+			expect(session.getActiveToolNames()).not.toContain("think");
+
+			settings.set("externalThinking", true);
+			await session.setThinkToolEnabled(true);
+
+			expect(session.getToolByName("think")).toBeDefined();
+			expect(session.getActiveToolNames()).toContain("think");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("think");
+
+			settings.set("externalThinking", false);
+			await session.setThinkToolEnabled(false);
+			expect(session.getActiveToolNames()).not.toContain("think");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("exposes the private think tool only on transports that can disable native reasoning", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated({ externalThinking: true });
+		const unsupported = requireBundledModel("xai", "grok-4");
+		const fable = requireBundledModel("anthropic", "claude-fable-5");
+		const responses = requireBundledModel("openai", "gpt-5");
+		const gemini = requireBundledModel("google", "gemini-2.5-flash");
+		const mandatoryGemini = requireBundledModel("google", "gemini-2.5-pro");
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			model: unsupported,
+		});
+		const authStorage = session.modelRegistry.authStorage;
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.setRuntimeApiKey("google", "test-key");
+		authStorage.setRuntimeApiKey("xai", "test-key");
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain("think");
+
+			await session.setModel(fable);
+			expect(session.getToolByName("think")).toBeDefined();
+			expect(session.getActiveToolNames()).toContain("think");
+			expect(session.systemPrompt.join("\n")).toContain("private scratchpad; not shown to user");
+
+			await session.setModel(responses);
+			expect(session.getActiveToolNames()).toContain("think");
+			await session.setModel(gemini);
+			expect(session.getActiveToolNames()).toContain("think");
+			await session.setModel(mandatoryGemini);
+			expect(session.getActiveToolNames()).not.toContain("think");
+
+			await session.setModel(unsupported);
+			expect(session.getActiveToolNames()).not.toContain("think");
+			expect(session.systemPrompt.join("\n")).not.toContain("private scratchpad; not shown to user");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("forces think and sends reasoning effort off for a Responses turn", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated({ externalThinking: true });
+		const requestTexts: string[] = [];
+		const sse = (events: unknown[]): Response =>
+			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				headers: { "content-type": "text/event-stream" },
+			});
+		const completed = (id: string) => ({
+			type: "response.completed",
+			response: {
+				id,
+				status: "completed",
+				usage: {
+					input_tokens: 1,
+					output_tokens: 1,
+					total_tokens: 2,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		});
+		const server = Bun.serve({
+			port: 0,
+			fetch: async request => {
+				requestTexts.push(await request.text());
+				if (requestTexts.length === 1) {
+					const argumentsJson = JSON.stringify({ thoughts: "Checked the request before answering." });
+					return sse([
+						{
+							type: "response.output_item.added",
+							output_index: 0,
+							item: {
+								type: "function_call",
+								id: "fc_think",
+								call_id: "call_think",
+								name: "think",
+								arguments: "",
+							},
+						},
+						{
+							type: "response.function_call_arguments.done",
+							output_index: 0,
+							item_id: "fc_think",
+							arguments: argumentsJson,
+						},
+						{
+							type: "response.output_item.done",
+							output_index: 0,
+							item: {
+								type: "function_call",
+								id: "fc_think",
+								call_id: "call_think",
+								name: "think",
+								arguments: argumentsJson,
+							},
+						},
+						completed("resp_think"),
+					]);
+				}
+				return sse([
+					{ type: "response.output_text.delta", output_index: 0, delta: "Done." },
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: {
+							type: "message",
+							id: "msg_done",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Done." }],
+						},
+					},
+					completed("resp_done"),
+				]);
+			},
+		});
+		const model = requireBundledModel("openai", "gpt-5");
+		// The prompt preflight validates the key through the registry (not the
+		// per-request `getApiKey` override), so seed it for keyless CI runners.
+		modelRegistry.authStorage.setRuntimeApiKey("openai", "test-key");
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			model: { ...model, baseUrl: `${server.url}v1` },
+			getApiKey: () => "test-key",
+		});
+		expect(session.getActiveToolNames()).toContain("think");
+
+		try {
+			await session.prompt("Use the scratchpad before answering.");
+			const firstRequest = requestTexts.at(0);
+			if (!firstRequest) throw new Error("Expected the initial provider request.");
+			expect(requestTexts).toHaveLength(2);
+			expect(JSON.parse(firstRequest)).toEqual(
+				expect.objectContaining({
+					// "none" is the only disable level the Responses wire accepts ("off" 400s).
+					reasoning: { effort: "none" },
+					tool_choice: expect.objectContaining({ name: "think" }),
+				}),
+			);
+		} finally {
+			await session.dispose();
+			server.stop(true);
 		}
 	});
 
@@ -934,7 +1116,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const mountedBefore = session.getMountedXdevToolNames();
 			const promptBefore = session.systemPrompt;
 			const originalTool = session.getToolByName("bash");
-			expect(originalTool).toBeDefined();
 			expect(session.hasBuiltInTool("bash")).toBe(true);
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
@@ -1066,13 +1247,18 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const errors: string[] = [];
 			const unsubscribe = runner.onError(error => {
 				errors.push(error.error);
+				// The 10ms budget exists only to reap the stalled first handler
+				// quickly; handlers run sequentially and the budget is read per
+				// handler, so restoring it here keeps machine load from timing out
+				// the genuine recovery registration too (flaked in full-suite runs).
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			});
-			testSetExtensionHandlerTimeoutMs(250);
+			testSetExtensionHandlerTimeoutMs(10);
 
 			await runner.emit({ type: "session_start" });
 			unsubscribe();
 
-			expect(errors).toContain("handler timed out after 250ms");
+			expect(errors).toContain("handler timed out after 10ms");
 			expect(session.getToolByName("stalled_registration_tool")).toBeUndefined();
 			expect(session.getToolByName("recovered_registration_tool")?.label).toBe("recovered_registration_tool");
 			expect(session.getEnabledToolNames()).toContain("recovered_registration_tool");
@@ -1269,10 +1455,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					await originalSetPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 					if (toolNames.includes("recovered_detached_tool")) recoveredActivation.resolve();
 				});
-			testSetExtensionHandlerTimeoutMs(250);
+			testSetExtensionHandlerTimeoutMs(10);
 
 			releaseStalledRegistration.resolve();
 			const failure = await detachedFailure.promise;
+			// Restore the default budget before the recovered registration flush:
+			// the 10ms budget was only for reaping the stalled activation, and the
+			// real presentation pass can exceed it under full-suite load.
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			releaseRecoveredRegistration.resolve();
 			await recoveredActivation.promise;
 
@@ -1749,7 +1939,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			expect(session.getAllToolNames()).toEqual(["read", "sdk_custom_tool"]);
 			expect(session.getActiveToolNames()).toEqual(["read", "sdk_custom_tool"]);
-			expect(session.getToolByName("sdk_custom_tool")).toBeDefined();
 		} finally {
 			await session.dispose();
 		}

@@ -127,14 +127,11 @@ function streamingPrefixes(text: string, step: number): string[] {
 	return prefixes;
 }
 
-async function settleFrame(term: VirtualTerminal): Promise<void> {
-	// These integration tests use the production TUI scheduler rather than the
-	// drainable unit-test scheduler, so the frame timer must elapse for the real
-	// differential renderer to write to the Ghostty-backed terminal.
-	const nextTick = Promise.withResolvers<void>();
-	process.nextTick(nextTick.resolve);
-	await nextTick.promise;
-	await Bun.sleep(45);
+async function settleFrame(term: VirtualTerminal, scheduler: DrainableScheduler): Promise<void> {
+	// Keep the real Ghostty-backed terminal and differential renderer, but drive
+	// frame scheduling explicitly: these regressions assert painted scrollback,
+	// not the production scheduler's ~33 ms cadence.
+	scheduler.flush();
 	await term.flush();
 }
 
@@ -499,12 +496,77 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 		expect(lines.map(line => Bun.stripANSI(line)).join("\n")).toContain("ctrl+o");
 	});
 
+	test("hidden todo snapshot does not clip settled rows from a later streaming response", async () => {
+		const rows = 8;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(60, rows);
+		Object.defineProperty(term, "isNativeViewportAtBottom", { configurable: true, value: () => undefined });
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.setScrollbackRebuild(false);
+		const transcript = new TranscriptContainer();
+		transcript.setToolActivityVisible(false);
+		transcript.addChild(new StaticBlock(["user: run the plan"]));
+
+		const todo = new ToolExecutionComponent("todo", { op: "init" }, {}, undefined, tui, process.cwd());
+		todo.updateResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					phases: [
+						{
+							name: "Workflow",
+							tasks: [{ content: "Stream the response", status: "in_progress" }],
+						},
+					],
+					storage: "session",
+				},
+			},
+			false,
+		);
+		transcript.addChild(todo);
+
+		const assistant = new AssistantMessageComponent(undefined, true);
+		transcript.addChild(assistant);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		const text = Array.from(
+			{ length: 30 },
+			(_, index) => `stream-row-${index} with stable content that must remain in terminal history.`,
+		).join("\n\n");
+
+		try {
+			tui.start();
+			scheduler.flush();
+			await term.flush();
+
+			for (const partialText of streamingPrefixes(text, 300)) {
+				assistant.updateContent(makeAssistantMessage([{ type: "text", text: partialText }]), {
+					transient: true,
+				});
+				tui.requestRender();
+				scheduler.flush();
+				await term.flush();
+			}
+
+			const midStreamRows = plainScrollBuffer(term);
+			expect(midStreamRows.some(row => row.includes("stream-row-0 "))).toBe(true);
+		} finally {
+			todo.seal();
+			assistant.dispose();
+			tui.stop();
+			await term.flush();
+		}
+	});
+
 	test("streams live assistant thinking and answer rows into native scrollback before finalize", async () => {
 		const rows = 8;
 		stubStdoutRows(rows);
 		const term = new VirtualTerminal(60, rows);
 		Object.defineProperty(term, "isNativeViewportAtBottom", { configurable: true, value: () => undefined });
-		const tui = new TUI(term);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 		const transcript = new TranscriptContainer();
 		const assistant = new AssistantMessageComponent(undefined, false);
 		transcript.addChild(assistant);
@@ -525,14 +587,14 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 
 		try {
 			tui.start();
-			await settleFrame(term);
+			await settleFrame(term, scheduler);
 
 			for (const partialThinking of streamingPrefixes(thinking, 300)) {
 				assistant.updateContent(makeAssistantMessage([{ type: "thinking", thinking: partialThinking }]), {
 					transient: true,
 				});
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			for (const partialText of streamingPrefixes(text, 300)) {
@@ -544,7 +606,7 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 					{ transient: true },
 				);
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			const midStreamRows = plainScrollBuffer(term);
@@ -555,7 +617,7 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 			assistant.markTranscriptBlockFinalized();
 			for (let i = 0; i < 2; i++) {
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			const finalRows = plainScrollBuffer(term);
@@ -658,7 +720,8 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 		const rows = 8;
 		stubStdoutRows(rows);
 		const term = new VirtualTerminal(60, rows);
-		const tui = new TUI(term);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 		const transcript = new TranscriptContainer();
 		const component = new ToolExecutionComponent(
 			"eval",
@@ -674,13 +737,13 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 
 		try {
 			tui.start();
-			await settleFrame(term);
+			await settleFrame(term, scheduler);
 
 			component.updateResult(makeEvalProbeResult(output, "running"), true);
 			component.setExpanded(true);
 			for (let i = 0; i < 3; i++) {
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			const midRunRows = plainScrollBuffer(term);
@@ -689,7 +752,7 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 			component.updateResult(makeEvalProbeResult(output, "complete"), false);
 			for (let i = 0; i < 2; i++) {
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			const settledRows = plainScrollBuffer(term);
@@ -701,7 +764,7 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 
 			for (let i = 0; i < 2; i++) {
 				tui.requestRender();
-				await settleFrame(term);
+				await settleFrame(term, scheduler);
 			}
 
 			const repeatedRows = plainScrollBuffer(term);

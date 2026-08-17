@@ -44,6 +44,7 @@ inferno.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
 parking_lot.workspace = true
+pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast.workspace = true

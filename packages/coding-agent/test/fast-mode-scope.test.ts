@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
@@ -14,18 +14,22 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 describe("/fast targets the current model's service-tier family", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
-	let session: AgentSession;
+	let session: AgentSession | undefined;
 	let modelRegistry: ModelRegistry;
 
-	beforeEach(() => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-fast-mode-scope-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-		}
-		authStorage?.close();
+		await session?.dispose();
+		session = undefined;
+	});
+
+	afterAll(() => {
+		authStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -41,9 +45,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey(model.provider, "token");
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),

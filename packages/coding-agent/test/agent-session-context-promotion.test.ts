@@ -1,5 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
@@ -9,6 +10,8 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+const originalSchedulerWait = scheduler.wait.bind(scheduler);
 
 describe("AgentSession context promotion", () => {
 	let tempDir: TempDir;
@@ -52,6 +55,12 @@ describe("AgentSession context promotion", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	beforeEach(() => {
+		// Promotion retries deliberately settle for 100ms in production. These
+		// tests assert the continuation and state transition, not elapsed time.
+		vi.spyOn(scheduler, "wait").mockImplementation((_delayMs, options) => originalSchedulerWait(0, options));
 	});
 
 	afterEach(async () => {

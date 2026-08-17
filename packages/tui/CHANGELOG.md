@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed long CPU-bound event-loop stalls being misclassified as system sleep and omitted from loop-blocked diagnostics.
+- Fixed focused components with markers falling back to full-screen redraws instead of direct row updates, preserving cursor position and native scrollback across marker changes.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed a terminal Device-Attributes reply leaking into the composer as literal text (e.g. `1;22;…;52c`) when it arrived after the startup capability-probe sentinel FIFO drained, a race made observable by the added latency of an SSH/zmx PTY chain. DA1 replies (`CSI ? … c`) and split private-CSI responses are now consumed for the whole session lifetime, not only while a probe sentinel is outstanding ([#8542](https://github.com/can1357/oh-my-pi/issues/8542)).
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Fixed Gemini reports rendering their final headings and tables as one raw code block when the model emitted a lone closing Markdown fence without its opener.
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed screen flashing in Herdr panes during transcript streaming.
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
+- Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
+
 ## [17.2.13] - 2026-08-11
 
 ### Fixed

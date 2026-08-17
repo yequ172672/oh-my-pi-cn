@@ -519,6 +519,8 @@ export const zhCNUiText: Readonly<Record<string, string>> = {
 	"current folder": "当前文件夹",
 	"Loading all projects…": "正在加载所有项目……",
 	"Space/Enter toggle · n note": "空格/Enter 切换 · n 添加备注",
+	"Space toggle · Enter next": "空格切换 · Enter 下一步",
+	"Space toggle · Enter submit": "空格切换 · Enter 提交",
 	"Enter select · n note": "Enter 选择 · n 添加备注",
 	"more running — open Agent Hub for full list": "个任务仍在运行——打开代理中心查看完整列表",
 	Subagents: "子代理",

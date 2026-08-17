@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -64,14 +64,24 @@ describe("AgentSession retry delay cap", () => {
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
-	beforeEach(async () => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-cap-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	});
+
+	beforeEach(async () => {
 		// A live env var now overrides a stored static api_key; these tests rotate stored Anthropic
 		// credentials, so neutralize env resolution (ignores every provider's ambient env key).
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		for (const provider of ["anthropic", "openai-codex"]) {
+			await authStorage.remove(provider);
+		}
+		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "cursor"]) {
+			authStorage.removeRuntimeApiKey(provider);
+		}
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		modelRegistry.clearSuppressedSelectors();
 	});
 
 	afterEach(async () => {
@@ -81,6 +91,9 @@ describe("AgentSession retry delay cap", () => {
 		}
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
 	});
@@ -1250,6 +1263,129 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
 		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered after Cursor stall" });
 	});
+
+	it("resumes a Cursor HTTP/2 stream reset after an unmarked MCP tool result", async () => {
+		const resetMessage = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
+		const model = createMockModel({
+			id: "composer-2.5",
+			provider: "cursor",
+		});
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "cursor-mcp-1",
+			name: "mcp__databricks_production_execute_sql",
+			arguments: { query: "SELECT 1" },
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "1" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		let streamCalls = 0;
+		let resumedWithToolResult = false;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			cursorOnToolResult: message => message,
+			streamFn: (_requestedModel, context, options) => {
+				streamCalls += 1;
+				if (streamCalls > 1) {
+					resumedWithToolResult = context.messages.some(
+						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+					);
+					model.push({ content: ["Recovered after Cursor HTTP/2 reset"] });
+					return model.stream(model, context, options);
+				}
+
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(toolResult);
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [toolCall],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: 0,
+						delta: JSON.stringify(toolCall.arguments),
+						partial,
+					});
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: resetMessage,
+						},
+					});
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Run the query");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(2);
+		expect(resumedWithToolResult).toBe(true);
+		expect(
+			session.agent.state.messages.some(
+				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+			),
+		).toBe(true);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after Cursor HTTP/2 reset",
+		});
+	});
+
 	it("resumes a Cursor reasonless abort after an unmarked client-side tool call", async () => {
 		const model = createMockModel({
 			id: "composer-2.5",

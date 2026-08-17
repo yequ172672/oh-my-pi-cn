@@ -24,9 +24,9 @@ It focuses on current implementation behavior, including fallback paths and cave
 
 `SessionManager` stores file sessions under a canonical-cwd bucket by default:
 
-- `~/.omp/agent/sessions/<scope>-<project-basename>-<sha256(canonical-cwd)>/*.jsonl`
+- `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl`
 
-`scope` is `home`, `tmp`, or `abs`. Legacy relative/absolute bucket names are migrated best-effort. `SessionManager.list(cwd, sessionDir?)` reads only the resolved bucket unless an explicit `sessionDir` is provided.
+`<encoded-cwd>` is the path-encoded canonical cwd (`-<relative>` under home, `-tmp-<relative>` under the temp root, `--<encoded-absolute>--` otherwise; see [session.md](session.md#on-disk-layout)). Buckets from the reverted 17.2.5-17.2.8 hashed scheme are migrated best-effort. `SessionManager.list(cwd, sessionDir?)` reads only the resolved bucket unless an explicit `sessionDir` is provided.
 
 ### Two listing paths with different payloads
 

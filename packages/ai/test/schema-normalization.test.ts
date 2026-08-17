@@ -606,6 +606,63 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 		expect(properties.self).toBe(sanitized as unknown as object);
 		expect((sanitized as { type: unknown }).type).toBe("object");
 	});
+
+	it("preserves exclusive-required anyOf for provider-specific handling", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				project: { type: "string" },
+				paths: { type: "array", items: { type: "string" } },
+				scopes: { type: "array", items: { type: "string" } },
+			},
+			required: ["project"],
+			anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+		};
+
+		expect(sanitizeSchemaForOpenAIResponses(schema)).toEqual({
+			type: "object",
+			properties: {
+				project: { type: "string" },
+				paths: { type: "array", items: { type: "string" } },
+				scopes: { type: "array", items: { type: "string" } },
+			},
+			required: ["project"],
+			anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+		});
+	});
+
+	it("does not flatten nested exclusive-required anyOf (xAI only rejects the tool root)", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				outputSchema: {
+					type: "object",
+					properties: {
+						paths: { type: "array", items: { type: "string" } },
+						scopes: { type: "array", items: { type: "string" } },
+					},
+					anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+				},
+			},
+			required: ["outputSchema"],
+		};
+		const sanitized = sanitizeSchemaForOpenAIResponses(schema);
+		expect(sanitized.anyOf).toBeUndefined();
+		const outputSchema = (sanitized.properties as Record<string, unknown>).outputSchema as Record<string, unknown>;
+		expect(outputSchema.anyOf).toEqual([{ required: ["paths"] }, { required: ["scopes"] }]);
+	});
+
+	it("does not flatten a root union that constrains existing properties", () => {
+		const schema = {
+			type: "object",
+			properties: { kind: { type: "string" } },
+			anyOf: [{ properties: { kind: { const: "a" } } }, { properties: { kind: { const: "b" } } }],
+		};
+		expect(sanitizeSchemaForOpenAIResponses(schema).anyOf).toEqual([
+			{ properties: { kind: { const: "a" } } },
+			{ properties: { kind: { const: "b" } } },
+		]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1014,7 +1071,6 @@ describe("normalizeSchemaForCCA", () => {
 		};
 		(circular.properties as Record<string, unknown>).self = circular;
 
-		expect(() => normalizeSchemaForCCA(circular)).not.toThrow();
 		expect(normalizeSchemaForCCA(circular)).toEqual({
 			type: "object",
 			properties: {

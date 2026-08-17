@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
+import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import fileObserverSystemPrompt from "../../commit/prompts/file-observer-system.md" with { type: "text" };
 import fileObserverUserPrompt from "../../commit/prompts/file-observer-user.md" with { type: "text" };
@@ -66,7 +66,7 @@ export async function runMapPhase({
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }] as Message[],
 		};
 
-		const response = await withRetry(
+		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(model, request, {
 					apiKey,
@@ -74,8 +74,7 @@ export async function runMapPhase({
 					reasoning: toReasoningEffort(thinkingLevel),
 					signal: AbortSignal.timeout(timeoutMs),
 				}),
-			maxRetries,
-			retryBackoffMs,
+			{ maxAttempts: maxRetries, baseDelayMs: retryBackoffMs },
 		);
 
 		const observations = parseObservations(response);
@@ -175,19 +174,4 @@ async function runWithConcurrency<T, R>(
 	});
 	await Promise.all(runners);
 	return results;
-}
-
-async function withRetry<T>(fn: () => Promise<T>, attempts: number, backoffMs: number): Promise<T> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < attempts; attempt += 1) {
-		try {
-			return await fn();
-		} catch (error) {
-			lastError = error;
-			if (attempt < attempts - 1) {
-				await Bun.sleep(backoffMs * (attempt + 1));
-			}
-		}
-	}
-	throw lastError;
 }

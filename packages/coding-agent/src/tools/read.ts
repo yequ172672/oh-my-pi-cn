@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { splitAddressableFileLines } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -99,7 +100,7 @@ import {
 	isRemoteMountPath,
 	type SuffixMatchCache,
 } from "./read-path-resolution";
-import { readPdfImageMember, rewritePdfImagePlaceholders, splitPdfImageMemberReadPath } from "./read-pdf-images";
+import { type PdfImageReadTarget, renderPdfPageScreenshot, splitPdfImageReadPath } from "./read-pdf";
 import { isMultiRange, isRawSelector, type ParsedSelector, parseSel, selToOffsetLimit } from "./read-selector";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
 import { isProseSummaryPath, renderSummary, routeReadThroughBridge, trySummarize } from "./read-summary";
@@ -119,10 +120,15 @@ const MAX_ARTIFACT_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
 async function readBracketContextFullLines(absolutePath: string, fileSize: number): Promise<string[] | undefined> {
 	if (fileSize > SNAPSHOT_MAX_BYTES) return undefined;
 	try {
-		return normalizeToLF(await Bun.file(absolutePath).text()).split("\n");
+		return splitAddressableFileLines(normalizeToLF(await Bun.file(absolutePath).text()));
 	} catch {
 		return undefined;
 	}
+}
+
+interface StreamFileLinesOptions {
+	includeTerminalNewline?: boolean;
+	stopScanAfterCollect?: boolean;
 }
 
 async function streamLinesFromFile(
@@ -132,7 +138,7 @@ async function streamLinesFromFile(
 	maxBytes: number,
 	selectedLineLimit: number | null,
 	signal?: AbortSignal,
-	stopScanAfterCollect = false,
+	options: StreamFileLinesOptions = {},
 ): Promise<{
 	lines: string[];
 	totalFileLines: number;
@@ -141,9 +147,12 @@ async function streamLinesFromFile(
 	firstLinePreview?: { text: string; bytes: number };
 	firstLineByteLength?: number;
 	selectedBytesTotal: number;
+	/** Whether the fully scanned source ended in a newline. */
+	hasTrailingNewline: boolean;
 	/** False when `stopScanAfterCollect` cut the scan short — `totalFileLines` is then a lower bound. */
 	reachedEof: boolean;
 }> {
+	const { includeTerminalNewline = false, stopScanAfterCollect = false } = options;
 	const bufferChunk = Buffer.allocUnsafe(READ_CHUNK_SIZE);
 	const collectedLines: string[] = [];
 	let lineIndex = 0;
@@ -311,7 +320,7 @@ async function streamLinesFromFile(
 		}
 	}
 
-	if (reachedEof && (endedWithNewline || currentLineLength > 0 || !sawAnyByte)) {
+	if (reachedEof && (currentLineLength > 0 || !sawAnyByte || (endedWithNewline && includeTerminalNewline))) {
 		finalizeLine();
 	}
 
@@ -330,6 +339,7 @@ async function streamLinesFromFile(
 		firstLineByteLength,
 		selectedBytesTotal,
 		reachedEof,
+		hasTrailingNewline: reachedEof && endedWithNewline,
 	};
 }
 
@@ -388,8 +398,13 @@ type ReadParams = ReadToolInput;
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
-	readonly approval = (args: unknown): ToolTier =>
-		pathTargetsSsh(String((args as { path?: unknown }).path ?? "")) ? "exec" : "read";
+	readonly approval = (args: unknown): ToolTier => {
+		let readPath = "";
+		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
+		if (pathTargetsSsh(readPath)) return "exec";
+		const target = splitPathAndSel(readPath);
+		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	description: string;
@@ -534,6 +549,40 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		flushText();
 
 		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+	}
+
+	async #readPdfPageScreenshot(options: {
+		readPath: string;
+		absolutePdfPath: string;
+		page: number;
+		pdfFileSize: number;
+		suffixResolution?: { from: string; to: string };
+		signal?: AbortSignal;
+	}): Promise<AgentToolResult<ReadToolDetails>> {
+		const { readPath, absolutePdfPath, page, pdfFileSize, suffixResolution, signal } = options;
+		const screenshot = await renderPdfPageScreenshot(this.session, absolutePdfPath, page, signal);
+		const screenshotFile = Bun.file(screenshot.dest);
+		const screenshotMetadata = await readImageMetadata(screenshot.dest);
+		const loaded = await this.#loadImageContent({
+			readPath,
+			absolutePath: screenshot.dest,
+			mimeType: screenshot.mimeType,
+			imageMetadata: screenshotMetadata,
+			fileSize: screenshotFile.size,
+		});
+		if (suffixResolution) {
+			const firstText = loaded.content.find((entry): entry is TextContent => entry.type === "text");
+			if (firstText) firstText.text = prependSuffixResolutionNotice(firstText.text, suffixResolution);
+		}
+		const image = loaded.content.find((entry): entry is ImageContent => entry.type === "image");
+		const details: ReadToolDetails = {
+			...loaded.details,
+			resolvedPath: absolutePdfPath,
+			contentType: image?.mimeType ?? screenshot.mimeType,
+			fileSize: pdfFileSize,
+			suffixResolution,
+		};
+		return toolResult(details).content(loaded.content).sourcePath(loaded.sourcePath).done();
 	}
 
 	/**
@@ -692,7 +741,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					maxBytesForRead,
 					maxLines,
 					signal,
-					fileSize > SNAPSHOT_MAX_BYTES, // giant file: collected ranges don't need an exact EOF line count
+					{ includeTerminalNewline: rawSelector, stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES },
 				);
 				totalFileLines = streamResult.totalFileLines;
 				collectedLines = streamResult.lines;
@@ -882,7 +931,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		// Prefer a literal filesystem match over selector interpretation so real
 		// POSIX filenames containing selector-looking suffixes win over structured
-		// archive / sqlite / pdf-image dispatch. A selector promoted from local://
+		// archive / sqlite / unsupported PDF-image dispatch. A selector promoted from local://
 		// remains separate so it cannot be mistaken for part of the resolved path.
 		const literalSplit =
 			promotedSelector === undefined
@@ -892,6 +941,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			promotedSelector !== undefined
 				? readPath.includes(":") && (await probeLiteralPathExists(readPath, this.session.cwd)) !== "missing"
 				: literalSplit.sel === undefined && splitPathAndSel(readPath).sel !== undefined;
+
+		let pdfImageRead: PdfImageReadTarget | null = null;
 
 		if (!rawPathIsLiteral) {
 			const archivePath = await resolveArchiveReadPath(this.session, readPath, suffixCache, signal);
@@ -915,39 +966,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				return readSqlite(sqlitePath, signal);
 			}
 
-			const pdfImageMemberPath = splitPdfImageMemberReadPath(readPath);
-			if (pdfImageMemberPath) {
-				let absolutePdfPath = resolveReadPath(pdfImageMemberPath.pdfPath, this.session.cwd);
-				let suffixResolution: { from: string; to: string } | undefined;
-				try {
-					const stat = await Bun.file(absolutePdfPath).stat();
-					if (stat.isDirectory())
-						throw new ToolError(`Path '${pdfImageMemberPath.pdfPath}' is a directory, not a PDF file`);
-				} catch (error) {
-					if (!isNotFoundError(error) || isRemoteMountPath(absolutePdfPath)) throw error;
-					const suffixMatch = await findSuffixMatchCached(
-						this.session,
-						suffixCache,
-						pdfImageMemberPath.pdfPath,
-						signal,
-					);
-					if (!suffixMatch) throw new ToolError(`Path '${pdfImageMemberPath.pdfPath}' not found`);
-					absolutePdfPath = suffixMatch.absolutePath;
-					suffixResolution = { from: pdfImageMemberPath.pdfPath, to: suffixMatch.displayPath };
-				}
-				return readPdfImageMember(
-					this.session,
-					this.#autoResizeImages,
-					absolutePdfPath,
-					pdfImageMemberPath.pdfPath,
-					pdfImageMemberPath.member,
-					suffixResolution,
-					signal,
-				);
-			}
+			const pdfCandidate = literalSplit.sel === undefined ? splitPdfImageReadPath(readPath) : null;
+			pdfImageRead =
+				pdfCandidate && (await probeLiteralPathExists(readPath, this.session.cwd)) === "missing"
+					? pdfCandidate
+					: null;
 		}
 
-		const localTarget = literalSplit;
+		const localTarget = pdfImageRead ? { path: pdfImageRead.pdfPath, sel: undefined } : literalSplit;
 		const localReadPath = localTarget.path;
 		const parsed = parseSel(localTarget.sel);
 
@@ -1026,6 +1052,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return this.#readFileConflicts(absolutePath, suffixResolution, signal);
 		}
 
+		if (pdfImageRead) {
+			return this.#readPdfPageScreenshot({
+				readPath,
+				absolutePdfPath: absolutePath,
+				page: pdfImageRead.page,
+				pdfFileSize: fileSize,
+				suffixResolution,
+				signal,
+			});
+		}
+
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
@@ -1092,8 +1129,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Convert document via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
 			if (result.ok) {
-				const renderedContent =
-					ext === ".pdf" ? rewritePdfImagePlaceholders(result.content, resolvedDisplayPath) : result.content;
+				const renderedContent = result.content;
 				// Route the converted markdown through the in-memory text builder
 				// so line-range selectors (`file.pdf:50-100`, `:5-16,40-80`) and
 				// raw mode apply against the converted output. Without this,
@@ -1256,7 +1292,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						maxBytesForRead,
 						selectedLineLimit,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
-						fileSize > SNAPSHOT_MAX_BYTES, // giant file: don't scan to EOF just for an exact line count
+						{ includeTerminalNewline: rawSelector, stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES },
 					);
 
 					const {
@@ -1267,6 +1303,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						firstLinePreview,
 						firstLineByteLength,
 						reachedEof,
+						hasTrailingNewline,
 					} = streamResult;
 
 					// Check if offset is out of bounds - return graceful message instead of throwing
@@ -1347,7 +1384,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const tag = isWholeFile
 							? getFileSnapshotStore(this.session).record(
 									canonicalSnapshotKey(absolutePath),
-									normalizeToLF(collectedLines.join("\n")),
+									normalizeToLF(`${collectedLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`),
 								)
 							: await recordFileSnapshot(this.session, absolutePath);
 						if (tag) {
@@ -1694,7 +1731,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			maxBytesForRead,
 			selectedLineLimit,
 			signal,
-			artifact.size > SNAPSHOT_MAX_BYTES,
+			{ includeTerminalNewline: rawSelector, stopScanAfterCollect: artifact.size > SNAPSHOT_MAX_BYTES },
 		);
 		const {
 			lines: collectedLines,

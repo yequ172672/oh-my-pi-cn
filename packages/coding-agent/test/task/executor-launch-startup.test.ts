@@ -68,6 +68,7 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 		sessionCreationStarted.resolve();

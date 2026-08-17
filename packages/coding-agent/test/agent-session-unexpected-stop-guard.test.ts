@@ -1,27 +1,32 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const recordToolSchema = type({ value: type("string") });
 
 type Harness = {
 	session: AgentSession;
-	authStorage: AuthStorage;
 	tempDir: TempDir;
 };
 type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 
 const activeHarnesses: Harness[] = [];
+const sharedAuthStorage = createInMemoryAuthStorage();
+sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+
+afterAll(() => {
+	sharedAuthStorage.close();
+});
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
 	name: "record",
@@ -62,11 +67,9 @@ async function createHarness(
 	settingsOverrides: SettingsOverrides = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-unexpected-stop-guard-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
-	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -98,7 +101,7 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, authStorage, tempDir };
+	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
 }
@@ -130,8 +133,7 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const harness of activeHarnesses) {
 		await harness.session.dispose();
-		harness.authStorage.close();
-		harness.tempDir.remove();
+		harness.tempDir.removeSync();
 	}
 	activeHarnesses.length = 0;
 });

@@ -164,6 +164,8 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
 	createComputerTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `think` scratchpad tool for runtime setting changes. */
+	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
@@ -209,8 +211,6 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
-	/** Local calendar date provider used by prompt-cache invalidation. */
-	getLocalCalendarDate?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */

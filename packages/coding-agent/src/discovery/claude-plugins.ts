@@ -379,8 +379,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 		roots.map(async root => {
 			const toolsDir = path.join(root.path, "tools");
 			return loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.scope, {
+				extensions: ["ts", "js"],
 				transform: (name, _content, filePath, source) => {
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+					const toolName = name.replace(/\.(ts|js)$/, "");
 					return {
 						name: toolName,
 						path: filePath,

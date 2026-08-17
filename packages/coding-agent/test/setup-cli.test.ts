@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { checkPythonSetup } from "../src/cli/setup-cli";
 
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -11,12 +12,11 @@ interface CliProcessResult {
 	error: string;
 }
 
-async function runSetupPython(cwd: string, envOverrides?: NodeJS.ProcessEnv): Promise<CliProcessResult> {
+async function runSetupPython(cwd: string): Promise<CliProcessResult> {
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		NO_COLOR: "1",
 		PI_CODING_AGENT_DIR: path.join(cwd, "agent"),
-		...envOverrides,
 	};
 	delete env.VIRTUAL_ENV;
 	delete env.CONDA_DEFAULT_ENV;
@@ -69,11 +69,9 @@ describe("omp setup python", () => {
 		await Bun.write(interpreter, "#!/bin/sh\nexit 0\n");
 		await fs.chmod(interpreter, 0o755);
 
-		const result = await runSetupPython(cwd);
+		const result = await checkPythonSetup(cwd);
 
-		expect(result.error).toBe("");
-		expect(result.exitCode).toBe(0);
-		expect(JSON.parse(result.output)).toMatchObject({
+		expect(result).toMatchObject({
 			available: true,
 			pythonPath: interpreter,
 			usingManagedEnv: false,
@@ -85,16 +83,19 @@ describe("omp setup python", () => {
 		const interpreter = path.join(cwd, "configured-python");
 		await Bun.write(interpreter, "#!/bin/sh\nexit 23\n");
 		await fs.chmod(interpreter, 0o755);
-		await Bun.write(path.join(cwd, ".omp", "config.yml"), `python:\n  interpreter: ${interpreter}\n`);
 
-		const result = await runSetupPython(cwd, { PI_PYTHON_SKIP_CHECK: "1" });
-
-		expect(result.error).toBe("");
-		expect(result.exitCode).toBe(1);
-		expect(JSON.parse(result.output)).toMatchObject({
-			available: false,
-			pythonPath: interpreter,
-			usingManagedEnv: false,
-		});
+		const previousSkipCheck = process.env.PI_PYTHON_SKIP_CHECK;
+		process.env.PI_PYTHON_SKIP_CHECK = "1";
+		try {
+			const result = await checkPythonSetup(cwd, interpreter);
+			expect(result).toMatchObject({
+				available: false,
+				pythonPath: interpreter,
+				usingManagedEnv: false,
+			});
+		} finally {
+			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
+			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
+		}
 	});
 });

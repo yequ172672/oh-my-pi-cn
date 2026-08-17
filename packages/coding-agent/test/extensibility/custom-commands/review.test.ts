@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -82,18 +82,21 @@ interface EditorCall {
 }
 
 describe("ReviewCommand", () => {
-	let tmpDir: string | undefined;
+	let tmpDir: string;
 
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		if (tmpDir) {
-			await removeWithRetries(tmpDir);
-			tmpDir = undefined;
-		}
+	beforeAll(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
 	});
 
-	async function createTempDir(): Promise<string> {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	afterAll(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	function createTempDir(): string {
 		return tmpDir;
 	}
 
@@ -184,8 +187,6 @@ describe("ReviewCommand", () => {
 			const result = await command.execute([], ctx);
 
 			expect(result).toBeUndefined();
-			await removeWithRetries(dir);
-			tmpDir = undefined;
 		}
 	});
 

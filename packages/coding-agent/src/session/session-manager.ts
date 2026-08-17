@@ -59,7 +59,13 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	loadEntriesFromFile,
+	loadSessionFile,
+	resolveBlobRefsInEntries,
+	type SessionLoadResult,
+	visitEntriesFromFile,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -83,6 +89,7 @@ import {
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
+const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -97,7 +104,31 @@ function fileSafeTimestamp(iso: string): string {
 }
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
-	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+	if (!sessionFile?.endsWith(".jsonl")) return null;
+	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
+}
+
+/** Copy a session's artifact directory to another session, matching interactive `/fork`. */
+export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
+	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
+	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
+	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+
+	try {
+		const sourceStat = await fs.promises.stat(sourceArtifactsDir);
+		if (sourceStat.isDirectory()) {
+			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true });
+		}
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to copy artifacts during fork", {
+				sourceArtifactsDir,
+				destinationArtifactsDir,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
 }
 
 /**
@@ -516,6 +547,7 @@ export class SessionManager {
 	 */
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
+	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -557,6 +589,15 @@ export class SessionManager {
 				error: error.message,
 				stack: error.stack,
 			});
+			for (const callback of this.#persistenceErrorCallbacks) {
+				try {
+					callback(error);
+				} catch (callbackError) {
+					logger.warn("Session persistence error observer failed", {
+						error: toError(callbackError).message,
+					});
+				}
+			}
 		}
 
 		return this.#diskFailure;
@@ -814,6 +855,7 @@ export class SessionManager {
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
 			this.#storage.writeTextSync(targetPath, body);
+			this.#clearDiskError();
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -906,7 +948,13 @@ export class SessionManager {
 			this.#atomicRewriteDirty = true;
 			return;
 		}
-		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#diskFailure) {
+			// The failed entry and any later entries remain in memory. A full
+			// replacement is the writability probe and restores all of them once
+			// transient storage pressure clears.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
 
 		// Lazy gate: a brand-new session is not written until it has an assistant
 		// message (or someone forced creation), so sessions that never produce
@@ -944,9 +992,9 @@ export class SessionManager {
 		// chain. Prefer appendSync so write failures latch `#diskFailure` before
 		// this call returns (not via a discarded rejected Promise after a later
 		// microtask). Callers stay non-throwing here — the core turn loop invokes
-		// appendMessage/appendCustomEntry without try/catch; flushSync/close and
-		// subsequent appends still throw the latched error. File writers apply
-		// each line to the OS page cache before return.
+		// appendMessage/appendCustomEntry without try/catch. A later entry retries
+		// all in-memory state through a full rewrite. File writers apply each line
+		// to the OS page cache before return.
 		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
 		// opens a fresh append handle and the entry still lands.
 		try {
@@ -955,16 +1003,28 @@ export class SessionManager {
 			if (writer.appendSync) {
 				writer.appendSync(line);
 			} else {
-				void writer.append(line).catch(err => this.#noteDiskFailure(err));
+				void writer.append(line).catch(err => {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					this.#noteDiskFailure(err);
+				});
 			}
 		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
 		}
 	}
 
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#diskFailure) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#rewriteSynchronously();
+			if (this.#diskFailure) throw this.#diskFailure;
+			return;
+		}
 
 		if (!this.#shouldHaveSessionFile()) {
 			this.#fileIsCurrent = false;
@@ -1288,7 +1348,7 @@ export class SessionManager {
 		await this.#setSessionFile(sessionFile);
 	}
 
-	async #setSessionFile(sessionFile: string, loadedEntries?: FileEntry[]): Promise<void> {
+	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -1297,8 +1357,8 @@ export class SessionManager {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		const titleSlot = await readTitleSlotFromFile(resolvedSessionFile, this.#storage);
-		const fileEntries = loadedEntries ?? (await loadEntriesFromFile(resolvedSessionFile, this.#storage));
+		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
@@ -1332,7 +1392,7 @@ export class SessionManager {
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
-		this.#rewriteRequired = migrated;
+		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
@@ -1440,10 +1500,13 @@ export class SessionManager {
 
 				const oldSessionFile = this.#sessionFile;
 				const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
-				const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile)!;
-				const newArtifactsDir = artifactsDirectoryFor(newSessionFile)!;
+				const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile);
+				const newArtifactsDir = artifactsDirectoryFor(newSessionFile);
 				const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
-				const artifactPathChanged = path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
+				const artifactPathChanged =
+					oldArtifactsDir !== null &&
+					newArtifactsDir !== null &&
+					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
 				let sessionMoved = false;
@@ -1467,7 +1530,7 @@ export class SessionManager {
 						}
 					}
 				} catch (err) {
-					if (artifactsMoved) {
+					if (artifactsMoved && oldArtifactsDir && newArtifactsDir) {
 						try {
 							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
 						} catch (rollbackErr) {
@@ -1985,6 +2048,14 @@ export class SessionManager {
 		};
 	}
 
+	/** Subscribe to persistence failures so hosts can surface lost-durability state. */
+	onPersistenceError(cb: (error: Error) => void): () => void {
+		this.#persistenceErrorCallbacks.add(cb);
+		return () => {
+			this.#persistenceErrorCallbacks.delete(cb);
+		};
+	}
+
 	/**
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
@@ -2142,6 +2213,7 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		advisor?: string;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2393,6 +2465,37 @@ export class SessionManager {
 		this.#setLeaf(null);
 	}
 
+	/**
+	 * Durably move the active branch past a discarded entry.
+	 *
+	 * The loader reconstructs the active branch from the last physical journal
+	 * entry, so changing the in-memory leaf alone is lost on reload. Known
+	 * metadata children are chained onto the discarded entry's parent before the
+	 * entry is removed. If any child may carry content, the subtree is preserved
+	 * off-branch instead. Both paths append a metadata-only branch marker and
+	 * rewrite the journal, making the selected path durable.
+	 */
+	async discardEntryDurably(entryId: string): Promise<void> {
+		const entry = this.#index.get(entryId);
+		if (!entry) return;
+		const children = this.#index.childrenOf(entryId);
+		const canReparentChildren = children.every(child => child.type === "service_tier_change");
+		let leafId = entry.parentId;
+		if (canReparentChildren) {
+			for (const child of children) {
+				child.parentId = leafId;
+				leafId = child.id;
+			}
+			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
+			this.#index.rebuild(this.#entries);
+		}
+		this.branchWithSummary(leafId, "", {
+			kind: DISCARDED_ENTRY_BRANCH_MARKER,
+			discardedEntryId: entryId,
+		});
+		await this.rewriteEntries();
+	}
+
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
 		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
@@ -2532,16 +2635,16 @@ export class SessionManager {
 	 * session file while creating a fresh session file in this sessionDir.
 	 *
 	 * `options.sessionFile` pins the new session's file path (default: an
-	 * auto-named `<timestamp>_<id>.jsonl` in `sessionDir`). Callers that register
-	 * the fork as a named agent (e.g. `/tan`) pass `<agentId>.jsonl` so the
-	 * persisted-subagent scan keys the agent by the same id the live ref uses.
+	 * auto-named `<timestamp>_<id>.jsonl` in `sessionDir`). Artifacts are copied
+	 * recursively by default; nested agents that deliberately share their parent's
+	 * artifact root may disable this with `copyArtifacts: false`.
 	 */
 	static async forkFrom(
 		sourcePath: string,
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: { copyArtifacts?: boolean; suppressBreadcrumb?: boolean; sessionFile?: string },
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -2574,6 +2677,9 @@ export class SessionManager {
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
+		if (options?.copyArtifacts !== false) {
+			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		}
 		return manager;
 	}
 
@@ -2588,8 +2694,8 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
-		const loaded = await loadEntriesFromFile(filePath, storage);
-		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
+		const loaded = await loadSessionFile(filePath, storage);
+		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when that directory still
 		// exists. A deleted project dir would make the constructor's #cwd — and the
 		// `setProjectDir` chdir interactive mode runs next — point at (and fail on)
@@ -2634,17 +2740,10 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			advisor?: string;
 		} | null;
 	} | null> {
-		let loaded: FileEntry[];
-		try {
-			loaded = await loadEntriesFromFile(filePath, storage);
-		} catch {
-			return null;
-		}
-		// A missing/empty file has no usable session — nothing to revive from.
-		if (loaded.length === 0) return null;
-		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
+		let header: SessionHeader | undefined;
 		let init: {
 			systemPrompt: string;
 			task: string;
@@ -2657,9 +2756,13 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			advisor?: string;
 		} | null = null;
-		for (let index = loaded.length - 1; index >= 0; index--) {
-			const entry = loaded[index];
+		const visit = (entry: FileEntry): void => {
+			if (entry.type === "session") {
+				header ??= entry;
+				return;
+			}
 			if (entry.type === "session_init") {
 				init = {
 					systemPrompt: entry.systemPrompt,
@@ -2673,11 +2776,19 @@ export class SessionManager {
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
+					advisor: entry.advisor,
 				};
-				break;
 			}
+		};
+
+		try {
+			await visitEntriesFromFile(filePath, visit, storage);
+		} catch {
+			return null;
 		}
-		return { cwd: header?.cwd ?? getProjectDir(), init };
+		// A missing, empty, or invalid file has no usable session.
+		if (!header) return null;
+		return { cwd: header.cwd ?? getProjectDir(), init };
 	}
 
 	/** Continue the most recent session, or create a new one if none exists. */

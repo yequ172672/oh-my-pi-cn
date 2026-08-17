@@ -208,7 +208,7 @@ describe("non-multiplexer resize viewport fast path", () => {
 		return { tui, blocks, scheduler };
 	}
 
-	it("paints only the viewport during a drag and never re-lays-out off-screen history", async () => {
+	it("paints only bounded viewport context during a drag", async () => {
 		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
 			const term = new VirtualTerminal(40, 10, 1000);
 			const { tui, blocks, scheduler } = makeTui(term);
@@ -236,9 +236,11 @@ describe("non-multiplexer resize viewport fast path", () => {
 				expect(tui.fullRedraws).toBe(baselineFull);
 				expect(eraseScrollbackCount(writes)).toBe(0);
 
-				// Blocks above the fold are never rendered during the drag; only the
-				// visible tail is.
-				expect(blocks.slice(0, 10).every(b => b.renderCount === 0)).toBe(true);
+				// OSC 66 spacer classification may compose at most six rows above
+				// the fold. With two-row blocks, that touches blocks 7-9 but still
+				// leaves the older history entirely unrendered.
+				expect(blocks.slice(0, 7).every(b => b.renderCount === 0)).toBe(true);
+				expect(blocks[7]!.renderCount).toBeGreaterThan(0);
 				expect(blocks.at(-1)!.renderCount).toBeGreaterThan(0);
 
 				// The viewport still shows the bottom of the transcript, rewrapped

@@ -114,6 +114,17 @@ async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<Pro
 	return { type: "unknown", description: "Unknown project type" };
 }
 
+/** Interpret an empty checker result without mistaking a crash for a clean workspace. */
+export function interpretEmptyDiagnosticsResult(
+	exitCode: number,
+	signalCode: string | null,
+	command: readonly string[],
+): string {
+	if (exitCode === 0) return "No issues found";
+	const detail = signalCode ? `was killed by ${signalCode}` : `exited with code ${exitCode}`;
+	return `Failed to run ${command.join(" ")}: the checker ${detail} without reporting anything, so the workspace was not verified`;
+}
+
 /** Run workspace diagnostics command and parse output */
 export async function runWorkspaceDiagnostics(
 	cwd: string,
@@ -146,11 +157,22 @@ export async function runWorkspaceDiagnostics(
 				new Response(proc.stdout).text(),
 				new Response(proc.stderr).text(),
 			]);
-			await proc.exited;
+			const exitCode = await proc.exited;
 			throwIfAborted(signal);
 			const combined = (stdout + stderr).trim();
 			if (!combined) {
-				return { output: "No issues found", projectType };
+				// A checker that exits non-zero without writing a single byte never
+				// inspected the workspace: it failed to start (missing toolchain),
+				// crashed, or was killed (OOM). Reporting "No issues found" there
+				// tells the agent the workspace is clean when nothing actually
+				// checked it. A non-zero exit *with* output is the normal way
+				// tsc/cargo/pyright report diagnostics and still falls through to
+				// the branch below. Mirrors the exit-status gate
+				// `resolveGoWorkspaceDiagnosticsCommand` already applies above.
+				return {
+					output: interpretEmptyDiagnosticsResult(exitCode, proc.signalCode, projectType.command),
+					projectType,
+				};
 			}
 			// Limit output length
 			const lines = combined.split("\n");

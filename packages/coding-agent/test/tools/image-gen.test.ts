@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
@@ -14,8 +14,11 @@ import { removeWithRetries, USER_AGENT } from "@oh-my-pi/pi-utils";
 const originalOpenRouterKey = Bun.env.OPENROUTER_API_KEY;
 const generatedImagePaths: string[] = [];
 
-afterEach(async () => {
-	await Promise.all(generatedImagePaths.splice(0).map(imagePath => removeWithRetries(imagePath)));
+afterAll(async () => {
+	await Promise.all(generatedImagePaths.map(imagePath => removeWithRetries(imagePath)));
+});
+
+afterEach(() => {
 	if (originalOpenRouterKey === undefined) {
 		delete Bun.env.OPENROUTER_API_KEY;
 	} else {

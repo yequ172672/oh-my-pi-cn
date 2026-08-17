@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -14,12 +13,13 @@ import {
 	stopThemeWatcher,
 } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TUI } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearance, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const MULTIPLEXER_ENV_KEYS = [
 	"TMUX",
@@ -104,7 +104,7 @@ describe("InteractiveMode theme scrollback refresh", () => {
 	let mode: InteractiveMode;
 	let terminal: AppearanceVirtualTerminal;
 
-	beforeEach(async () => {
+	beforeAll(async () => {
 		originalMultiplexerEnv = {};
 		for (const key of MULTIPLEXER_ENV_KEYS) {
 			originalMultiplexerEnv[key] = Bun.env[key];
@@ -116,7 +116,7 @@ describe("InteractiveMode theme scrollback refresh", () => {
 		await initTheme();
 		await setTheme("dark");
 
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = createInMemoryAuthStorage();
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
@@ -141,22 +141,31 @@ describe("InteractiveMode theme scrollback refresh", () => {
 		await mode.init({ suppressWelcomeIntro: true });
 	});
 
-	afterEach(async () => {
-		mode?.stop();
-		stopThemeWatcher();
+	beforeEach(async () => {
+		for (const key of MULTIPLEXER_ENV_KEYS) delete Bun.env[key];
+		terminal.appearanceOnRefresh = undefined;
+		terminal.returnRefreshToken = true;
+		terminal.deferRefreshReport = true;
 		await setTheme("dark");
-		await session?.dispose();
-		authStorage?.close();
-		tempDir?.removeSync();
+		terminal.emitAppearanceReport("dark");
+	});
+
+	afterEach(() => {
+		stopThemeWatcher();
+		vi.restoreAllMocks();
+		for (const key of MULTIPLEXER_ENV_KEYS) delete Bun.env[key];
+	});
+
+	afterAll(async () => {
+		mode.stop();
+		await session.dispose();
+		authStorage.close();
+		tempDir.removeSync();
 		for (const key of MULTIPLEXER_ENV_KEYS) {
 			const value = originalMultiplexerEnv[key];
-			if (value === undefined) {
-				delete Bun.env[key];
-			} else {
-				Bun.env[key] = value;
-			}
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
 		}
-		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
 

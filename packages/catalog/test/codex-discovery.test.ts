@@ -5,8 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { fetchCodexModels } from "@oh-my-pi/pi-catalog/discovery/codex";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -139,6 +141,58 @@ describe("Codex model discovery", () => {
 		expect(sol?.contextWindow).toBe(372_000);
 		const legacy = result?.models.find(model => model.id === "gpt-5.5");
 		expect(legacy?.contextWindow).toBe(272_000);
+	});
+
+	it("normalizes Codex Daybreak aliases to GPT-5.6 capabilities and pricing", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				new Response(
+					JSON.stringify({
+						models: [
+							{
+								slug: "gpt-daybreak-blue-latest",
+								display_name: "Daybreak Blue",
+								default_reasoning_level: "high",
+								supported_reasoning_levels: ["minimal", "low", "medium", "high", "xhigh"],
+								input_modalities: ["text", "image"],
+								supported_in_api: true,
+							},
+							{
+								slug: "gpt-daybreak-red-latest",
+								display_name: "Daybreak Red",
+								context_window: 400_000,
+								default_reasoning_level: "high",
+								supported_reasoning_levels: ["minimal", "low", "medium", "high", "xhigh"],
+								input_modalities: ["text", "image"],
+								supported_in_api: true,
+							},
+						],
+					}),
+				),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			clientVersion: "0.99.0",
+			fetchFn,
+		});
+		const blue = result?.models.find(model => model.id === "gpt-daybreak-blue-latest");
+		if (!blue) throw new Error("Expected discovered Daybreak Blue model");
+		const red = result?.models.find(model => model.id === "gpt-daybreak-red-latest");
+		if (!red) throw new Error("Expected discovered Daybreak Red model");
+
+		expect(blue.contextWindow).toBe(372_000);
+		expect(getSupportedEfforts(buildModel(blue))).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(blue.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
+		expect(red.contextWindow).toBe(400_000);
+		expect(red.cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
 	});
 
 	it("honors context_window when upstream actively reports it for GPT-5.6 SKUs", async () => {

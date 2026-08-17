@@ -11,14 +11,15 @@ describe.skipIf(!HAS_JULIA)("eval Julia prelude helpers", () => {
 		await disposeJuliaKernelSessionsByOwner(OWNER_ID);
 	}, 30_000);
 
-	it("supports output ranges, JSON queries, metadata, and ANSI stripping", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-julia-output-");
+	it("supports prelude helpers and renders exception details in one kernel session", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-julia-prelude-");
 		const artifactsDir = path.join(tempDir.path(), "session-artifacts");
 		await Bun.write(path.join(artifactsDir, "alpha.md"), "one\ntwo\nthree\nfour");
 		await Bun.write(path.join(artifactsDir, "json.md"), JSON.stringify({ items: [{ name: "a" }, { name: "b" }] }));
 		await Bun.write(path.join(artifactsDir, "ansi.md"), "\u001b[31mred\u001b[0m");
+		const sessionId = `julia-prelude:${crypto.randomUUID()}`;
 
-		const result = await executeJulia(
+		const helpers = await executeJulia(
 			`
 println("RANGE=", replace(output("alpha", offset=2, limit=2), "\\n" => "|"))
 println("QUERY=", output("json", query=".items[1].name"))
@@ -32,35 +33,32 @@ nothing
 			{
 				cwd: tempDir.path(),
 				artifactsDir,
-				sessionId: `julia-prelude-output:${crypto.randomUUID()}`,
+				sessionId,
 				kernelOwnerId: OWNER_ID,
 				reset: true,
 			},
 		);
 
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain("RANGE=two|three");
-		expect(result.output).toContain('QUERY="b"');
-		expect(result.output).toContain("STRIPPED=red");
-		expect(result.output).toContain("META=alpha:true");
-		expect(result.output).toContain("MULTI=2:alpha:json");
-	}, 60_000);
+		expect(helpers.exitCode).toBe(0);
+		expect(helpers.output).toContain("RANGE=two|three");
+		expect(helpers.output).toContain('QUERY="b"');
+		expect(helpers.output).toContain("STRIPPED=red");
+		expect(helpers.output).toContain("META=alpha:true");
+		expect(helpers.output).toContain("MULTI=2:alpha:json");
 
-	it("surfaces the exception type and message in the error output, not just stack frames", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-julia-error-");
-		const result = await executeJulia(`println("="^8)\nmissing_var_xyz + 1`, {
+		const error = await executeJulia(`println("="^8)\nmissing_var_xyz + 1`, {
 			cwd: tempDir.path(),
-			sessionId: `julia-prelude-error:${crypto.randomUUID()}`,
+			artifactsDir,
+			sessionId,
 			kernelOwnerId: OWNER_ID,
-			reset: true,
 		});
 
 		// The rendered error must carry the actual exception, not only the
 		// runner-internal backtrace frames (regression: traceback-only output
 		// hid `ename`/`evalue`).
-		expect(result.output).toContain("UndefVarError");
-		expect(result.output).toContain("missing_var_xyz");
+		expect(error.output).toContain("UndefVarError");
+		expect(error.output).toContain("missing_var_xyz");
 		// Frames are still present alongside the message.
-		expect(result.output).toContain("top-level scope");
-	}, 30_000);
+		expect(error.output).toContain("top-level scope");
+	}, 60_000);
 });

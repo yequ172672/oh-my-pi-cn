@@ -223,12 +223,15 @@ describe("buildModel", () => {
 	});
 });
 
-describe("xAI-OAuth Responses reasoning-effort suppression", () => {
-	const grokResponsesSpec = (id: string): ModelSpec<"openai-responses"> => ({
+describe("xAI Responses reasoning-effort suppression", () => {
+	const grokResponsesSpec = (
+		id: string,
+		provider: "xai" | "xai-oauth" = "xai-oauth",
+	): ModelSpec<"openai-responses"> => ({
 		id,
 		name: id,
 		api: "openai-responses",
-		provider: "xai-oauth",
+		provider,
 		baseUrl: "https://api.x.ai/v1",
 		reasoning: true,
 		input: ["text"],
@@ -248,6 +251,47 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 		expect(buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3")).supportsReasoningEffort).toBe(true);
 	});
 
+	it("applies the same Responses dialect to paid xai and xai-oauth", () => {
+		const paid = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai"));
+		const oauth = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai-oauth"));
+		expect(paid.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(oauth.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(paid.includeEncryptedReasoning).toBe(true);
+		expect(oauth.includeEncryptedReasoning).toBe(true);
+		expect(paid.filterReasoningHistory).toBe(false);
+		expect(oauth.filterReasoningHistory).toBe(false);
+		expect(paid.supportsImageDetailOriginal).toBe(false);
+		expect(oauth.supportsImageDetailOriginal).toBe(false);
+		expect(paid.supportsReasoningEffort).toBe(true);
+		expect(oauth.supportsReasoningEffort).toBe(true);
+		expect(paid.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
+		expect(oauth.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
+		expect(
+			buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.20-multi-agent-0309", "xai")).reasoningEffortMap,
+		).toEqual({ minimal: "low" });
+		expect(paid.supportsPenaltyAndStopParams).toBe(false);
+		expect(oauth.supportsPenaltyAndStopParams).toBe(false);
+		expect(paid.supportsReasoningSummary).toBe(false);
+		expect(oauth.supportsReasoningSummary).toBe(false);
+	});
+
+	it("suppresses penalty params on every first-party xAI Responses model", () => {
+		const reasoning = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.5", "xai"));
+		const nonReasoning = buildOpenAIResponsesCompat({
+			...grokResponsesSpec("grok-2", "xai"),
+			reasoning: false,
+		});
+		expect(reasoning.supportsPenaltyAndStopParams).toBe(false);
+		expect(nonReasoning.supportsPenaltyAndStopParams).toBe(false);
+	});
+
+	it("omits effort for paid xai models off the Grok allowlist", () => {
+		const compat = buildOpenAIResponsesCompat(grokResponsesSpec("grok-code-fast-1", "xai"));
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
+		expect(buildModel(grokResponsesSpec("grok-code-fast-1", "xai")).thinking).toBeUndefined();
+	});
+
 	it("lets an explicit compat.supportsReasoningEffort override the allowlist default", () => {
 		const compat = buildOpenAIResponsesCompat({
 			...grokResponsesSpec("grok-build"),
@@ -256,7 +300,7 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 		expect(compat.supportsReasoningEffort).toBe(true);
 	});
 
-	it("does not suppress effort for a non-xai-oauth provider with a grok-like id", () => {
+	it("does not suppress effort for a non-xAI provider with a grok-like id", () => {
 		const compat = buildOpenAIResponsesCompat({
 			...grokResponsesSpec("grok-build"),
 			provider: "openai",
@@ -758,6 +802,52 @@ describe("model cache spec round trip", () => {
 			expect(model?.compat.supportsDeveloperRole).toBe(true);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves static long-context pricing through dynamic refresh and cache restore", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-tiered-cost-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const staticModel = completionsSpec({
+			id: "tiered-model",
+			provider: "tiered-cost-test",
+			cost: {
+				input: 1,
+				output: 2,
+				cacheRead: 0.1,
+				cacheWrite: 1.25,
+				longContext: {
+					inputThreshold: 272_000,
+					input: 2,
+					output: 3,
+					cacheRead: 0.2,
+					cacheWrite: 2.5,
+				},
+			},
+		});
+		const dynamicModel = completionsSpec({
+			...staticModel,
+			cost: { input: 3, output: 4, cacheRead: 0.3, cacheWrite: 3.75 },
+		});
+		const options = {
+			providerId: "tiered-cost-test",
+			staticModels: [staticModel],
+			cacheDbPath: dbPath,
+		};
+		try {
+			const online = await resolveProviderModels<"openai-completions">(
+				{ ...options, fetchDynamicModels: async () => [dynamicModel] },
+				"online",
+			);
+			expect(online.models[0]?.cost).toEqual({
+				...dynamicModel.cost,
+				longContext: staticModel.cost.longContext,
+			});
+
+			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
+			expect(offline.models[0]?.cost.longContext).toEqual(staticModel.cost.longContext);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

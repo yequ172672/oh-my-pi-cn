@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage, type CompactionSummaryMessage, countTokens } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { calculateContextTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
@@ -9,9 +9,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const CONTEXT_WINDOW = 372_000;
 const CACHE_READ_TOKENS = 371_200;
@@ -34,15 +35,18 @@ describe("AgentSession advisor context maintenance", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 
-	beforeEach(async () => {
+	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-context-maintenance-");
-		authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		await session?.dispose();
+	});
+
+	afterAll(async () => {
 		authStorage.close();
 		await tempDir.remove();
 	});
@@ -237,8 +241,6 @@ describe("AgentSession advisor context maintenance", () => {
 		releaseCredential.resolve();
 		await credentialReturned.promise;
 		await prompt;
-		await Bun.sleep(0);
-
 		expect(credentialSignal?.aborted).toBe(true);
 		expect(session.getAdvisorAgent()?.state.model).toBe(advisorMock);
 	});

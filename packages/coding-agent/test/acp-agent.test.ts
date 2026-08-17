@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -452,6 +452,7 @@ const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 afterEach(async () => {
+	vi.useRealTimers();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -522,13 +523,10 @@ async function createHarness(
 	};
 }
 
-/**
- * Wait until `#scheduleBootstrapUpdates`'s timer has fired and the
- * session-lifetime subscription is installed. 30 ms of slack absorbs
- * `setTimeout` drift without slowing tests meaningfully.
- */
-async function waitForBootstrapGuard(): Promise<void> {
-	await Bun.sleep(ACP_BOOTSTRAP_RACE_GUARD_MS + 150);
+/** Fire `#scheduleBootstrapUpdates`'s guard without paying wall-clock time. */
+async function advanceBootstrapGuard(): Promise<void> {
+	vi.advanceTimersByTime(ACP_BOOTSTRAP_RACE_GUARD_MS);
+	await Promise.resolve();
 }
 
 describe("ACP agent", () => {
@@ -661,7 +659,6 @@ describe("ACP agent", () => {
 		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
 
 		const handler = session.planProposalHandler;
-		expect(typeof handler).toBe("function");
 
 		// No plan file written → handler surfaces a ToolError telling the
 		// agent to write the plan before requesting approval.
@@ -793,11 +790,12 @@ describe("ACP agent", () => {
 		// reached the client first), those changes must surface to clients as
 		// `config_option_update` so TORTAS-style fleet views stay in sync.
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Wait past the 50ms bootstrap timer so the lifetime subscription is
+		// Advance past the 50ms bootstrap timer so the lifetime subscription is
 		// installed before we drive an internal thinking-level change.
-		await waitForBootstrapGuard();
+		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
 		session.setThinkingLevel("high");
@@ -824,6 +822,7 @@ describe("ACP agent", () => {
 		session.setThinkingLevel("high");
 		expect(harness.updates.length).toBe(updatesBeforeRedundant);
 
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -835,8 +834,9 @@ describe("ACP agent", () => {
 		// about yet (matches Zed's `Received session notification for unknown
 		// session` race that `#scheduleBootstrapUpdates` already guards).
 		// The fake harness lets us simulate that pre-bootstrap window by
-		// driving the change before sleeping past the 50ms guard.
+		// driving the change before advancing past the 50ms guard.
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 
@@ -853,10 +853,9 @@ describe("ACP agent", () => {
 					notification.update.sessionUpdate === "config_option_update",
 			);
 		expect(beforeBootstrap.length).toBe(0);
-
-		// After the 50ms bootstrap timer fires the subscription is installed,
-		// and subsequent changes do surface.
-		await waitForBootstrapGuard();
+		// After advancing through the 50ms bootstrap timer, the subscription is
+		// installed and subsequent changes do surface.
+		await advanceBootstrapGuard();
 		const baseline = harness.updates.length;
 		session.setThinkingLevel("medium");
 		const afterBootstrap = harness.updates
@@ -868,6 +867,7 @@ describe("ACP agent", () => {
 			);
 		expect(afterBootstrap.length).toBeGreaterThanOrEqual(1);
 
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -878,11 +878,12 @@ describe("ACP agent", () => {
 		// push the notification. The ACP surface must not also push a duplicate
 		// `config_option_update` of its own.
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		// Wait past the bootstrap guard so the lifetime subscription is
 		// installed and the client-driven setSessionConfigOption produces
 		// exactly one notification through it.
-		await waitForBootstrapGuard();
+		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
 		const response = await harness.agent.setSessionConfigOption({
@@ -908,6 +909,7 @@ describe("ACP agent", () => {
 			| undefined;
 		expect(thinkingOption?.currentValue).toBe("high");
 
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -921,9 +923,10 @@ describe("ACP agent", () => {
 		// Zed's status bar) goes stale the moment prewalk hands off to a
 		// cheaper model mid-session.
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		await waitForBootstrapGuard();
+		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
 		await session.setModel(TEST_MODELS[1]!);
@@ -950,6 +953,7 @@ describe("ACP agent", () => {
 		await session.setModel(TEST_MODELS[1]!);
 		expect(harness.updates.length).toBe(updatesBeforeRedundant);
 
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -960,8 +964,9 @@ describe("ACP agent", () => {
 		// lifetime subscription push the notification. The ACP surface must not
 		// also push a duplicate `config_option_update` of its own.
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		await waitForBootstrapGuard();
+		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
 		const response = await harness.agent.setSessionConfigOption({
@@ -985,6 +990,7 @@ describe("ACP agent", () => {
 			| undefined;
 		expect(modelOption?.currentValue).toBe(`${TEST_MODELS[1]!.provider}/${TEST_MODELS[1]!.id}`);
 
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

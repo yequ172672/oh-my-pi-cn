@@ -87,8 +87,16 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 				key: "cacheRate",
 				header: "Cache Rate",
 				numeric: true,
+				render: (item: FolderRowView) => <span className="font-mono">{formatPercent(item.cacheRate)}</span>,
+			},
+			{
+				key: "cacheSavings",
+				header: "Cache Savings",
+				numeric: true,
 				render: (item: FolderRowView) => (
-					<span className="stats-text-success font-medium">{formatPercent(item.cacheRate)}</span>
+					<span className={`${item.cacheSavings < 0 ? "stats-text-danger" : "stats-text-success"} font-medium`}>
+						{formatPercent(item.cacheSavings)}
+					</span>
 				),
 			},
 			{
@@ -129,8 +137,12 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 					<div className="stats-mobile-card-value font-mono">{formatCost(item.totalCost)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cache</div>
+					<div className="stats-mobile-card-label">Cache Rate</div>
 					<div className="stats-mobile-card-value">{formatPercent(item.cacheRate)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Cache Savings</div>
+					<div className="stats-mobile-card-value">{formatPercent(item.cacheSavings)}</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Duration</div>

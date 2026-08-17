@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	type Component,
 	Container,
+	CURSOR_MARKER,
 	Editor,
 	type Focusable,
 	type NativeScrollbackCommittedRows,
@@ -71,6 +72,10 @@ class AnchoredStatusContainer extends Container implements NativeScrollbackLiveR
 		const hasAnchoredRows = this.children.length > 0;
 		return hasAnchoredRows ? 0 : undefined;
 	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return true;
+	}
 }
 
 function strip(rows: string[]): string[] {
@@ -79,6 +84,16 @@ function strip(rows: string[]): string[] {
 
 function visible(term: VirtualTerminal): string[] {
 	return strip(term.getViewport()).filter(row => row.length > 0);
+}
+
+function captureWrites(term: VirtualTerminal): string[] {
+	const writes: string[] = [];
+	const write = term.write.bind(term);
+	term.write = (data: string): void => {
+		writes.push(data);
+		write(data);
+	};
+	return writes;
 }
 
 class RenderCountingTUI extends TUI {
@@ -351,6 +366,46 @@ describe("TUI.requestComponentRender", () => {
 			await term.flush();
 		}
 	});
+	it("keeps removed pinned panels and repeated transcript copies out of scrollback", async () => {
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const markers = Array.from({ length: 5 }, (_unused, index) => `HIST-${index}`);
+		const transcript = new CountingLines(markers);
+		const status = new AnchoredStatusContainer();
+		const editor = new CountingLines([`editor${CURSOR_MARKER}`]);
+		tui.addChild(transcript);
+		tui.addChild(status);
+		tui.addChild(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			for (let cycle = 1; cycle <= 3; cycle++) {
+				const panel = new CountingLines([`panel-${cycle}-0`]);
+				status.addChild(panel);
+				tui.requestRender();
+				await scheduler.drain(term);
+				for (let tick = 1; tick <= 8; tick++) {
+					panel.set(Array.from({ length: tick + 1 }, (_row, index) => `panel-${cycle}-${tick}-${index}`));
+					tui.requestComponentRender(panel);
+					await scheduler.drain(term);
+				}
+				status.clear();
+				tui.requestRender();
+				await scheduler.drain(term);
+			}
+
+			const buffer = strip(term.getScrollBuffer()).join("\n");
+			for (const marker of markers) {
+				expect(buffer.split(marker)).toHaveLength(2);
+			}
+			expect(buffer).not.toContain("panel-");
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
 });
 
 describe("TUI keystroke-scoped render", () => {
@@ -532,6 +587,202 @@ describe("TUI.requestDirectWrite", () => {
 			expect(tui.renders).toBe(tuiRenders);
 			expect(transcript.renders).toBe(transcriptRenders);
 			expect(footer.renders).toBe(footerRenders);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("directly strips markers while updating ANSI and wide-grapheme cursor geometry", async () => {
+		const term = new VirtualTerminal(40, 5, 1_000);
+		const writes = captureWrites(term);
+		const scheduler = new StressRenderScheduler();
+		const tui = new RenderCountingTUI(term, true, { renderScheduler: scheduler });
+		const head = new CountingLines(["head"]);
+		const editor = new CountingLines(["plain"]);
+		const footer = new CountingLines(["footer"]);
+		tui.addChild(head);
+		tui.addChild(editor);
+		tui.addChild(footer);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const tuiRenders = tui.renders;
+			writes.length = 0;
+
+			editor.set([`\x1b[31m好a${CURSOR_MARKER}b${CURSOR_MARKER}\x1b[0m`]);
+			tui.requestDirectWrite(editor);
+			await scheduler.drain(term);
+
+			expect(strip(term.getViewport())).toEqual(["head", "好ab", "footer", "", ""]);
+			expect(term.getCursor()).toEqual({ row: 1, col: 3 });
+			expect(tui.renders).toBe(tuiRenders);
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+
+			writes.length = 0;
+			editor.set(["done"]);
+			tui.requestDirectWrite(editor);
+			await scheduler.drain(term);
+
+			expect(strip(term.getViewport())).toEqual(["head", "done", "footer", "", ""]);
+			expect(tui.renders).toBe(tuiRenders);
+			expect(writes.join("")).toContain("\x1b[?25l");
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("moves a marker without repainting unchanged row bytes", async () => {
+		const term = new VirtualTerminal(40, 4, 1_000);
+		const writes = captureWrites(term);
+		const scheduler = new StressRenderScheduler();
+		const tui = new RenderCountingTUI(term, true, { renderScheduler: scheduler });
+		const editor = new CountingLines([`ab${CURSOR_MARKER}cd`, "efgh"]);
+		tui.addChild(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			expect(strip(term.getViewport())).toEqual(["abcd", "efgh", "", ""]);
+			expect(term.getCursor()).toEqual({ row: 0, col: 2 });
+			const tuiRenders = tui.renders;
+			writes.length = 0;
+
+			editor.set(["abcd", `e${CURSOR_MARKER}fgh`]);
+			tui.requestDirectWrite(editor);
+			await scheduler.drain(term);
+
+			expect(strip(term.getViewport())).toEqual(["abcd", "efgh", "", ""]);
+			expect(term.getCursor()).toEqual({ row: 1, col: 1 });
+			expect(tui.renders).toBe(tuiRenders);
+			expect(writes.join("")).not.toContain("abcd");
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("preserves later sibling precedence across marker interval growth, shrink, and recompose", async () => {
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const writes = captureWrites(term);
+		const scheduler = new StressRenderScheduler();
+		const tui = new RenderCountingTUI(term, true, { renderScheduler: scheduler });
+		const earlier = new CountingLines(["early"]);
+		const target = new CountingLines(["t0", "t1", "t2"]);
+		const later = new CountingLines([`later${CURSOR_MARKER}`]);
+		tui.addChild(earlier);
+		tui.addChild(target);
+		tui.addChild(later);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			expect(term.getCursor()).toEqual({ row: 4, col: 5 });
+			const tuiRenders = tui.renders;
+			writes.length = 0;
+
+			target.set([`${CURSOR_MARKER}t0`, `t${CURSOR_MARKER}1`, `t2${CURSOR_MARKER}`]);
+			tui.requestDirectWrite(target);
+			await scheduler.drain(term);
+			expect(term.getCursor()).toEqual({ row: 4, col: 5 });
+			expect(tui.renders).toBe(tuiRenders);
+
+			target.set(["t0", `t${CURSOR_MARKER}1`, "t2"]);
+			tui.requestDirectWrite(target);
+			await scheduler.drain(term);
+			expect(term.getCursor()).toEqual({ row: 4, col: 5 });
+			expect(tui.renders).toBe(tuiRenders);
+
+			later.set(["later"]);
+			tui.requestDirectWrite(later);
+			await scheduler.drain(term);
+			expect(term.getCursor()).toEqual({ row: 2, col: 1 });
+			expect(tui.renders).toBe(tuiRenders);
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+
+			const targetRenders = target.renders;
+			writes.length = 0;
+			earlier.set(["early-new"]);
+			tui.requestComponentRender(earlier);
+			await scheduler.drain(term);
+
+			expect(strip(term.getViewport())).toEqual(["early-new", "t0", "t1", "t2", "later", "", "", ""]);
+			expect(term.getCursor()).toEqual({ row: 2, col: 1 });
+			expect(tui.renders).toBeGreaterThan(tuiRenders);
+			expect(target.renders).toBe(targetRenders);
+			expect(writes.join("")).toContain("\x1b[?25h");
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("keeps non-empty native scrollback byte-for-byte stable during marker direct writes", async () => {
+		const term = new VirtualTerminal(30, 4, 1_000);
+		const writes = captureWrites(term);
+		const scheduler = new StressRenderScheduler();
+		const tui = new RenderCountingTUI(term, true, { renderScheduler: scheduler });
+		const transcript = new CountingLines(Array.from({ length: 8 }, (_unused, row) => `history-${row}`));
+		const editor = new CountingLines(["anim-0"]);
+		tui.addChild(transcript);
+		tui.addChild(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const beforeBuffer = term.getScrollBuffer();
+			const beforeHistory = beforeBuffer.slice(0, Math.max(0, beforeBuffer.length - term.rows));
+			expect(beforeHistory.length).toBeGreaterThan(0);
+			expect(beforeHistory.some(row => row.trimEnd().length > 0)).toBe(true);
+			const tuiRenders = tui.renders;
+			writes.length = 0;
+
+			editor.set([`anim-1${CURSOR_MARKER}`]);
+			tui.requestDirectWrite(editor);
+			await scheduler.drain(term);
+
+			const afterBuffer = term.getScrollBuffer();
+			const afterHistory = afterBuffer.slice(0, Math.max(0, afterBuffer.length - term.rows));
+			expect(afterHistory).toEqual(beforeHistory);
+			expect(strip(term.getViewport())).toEqual(["history-5", "history-6", "history-7", "anim-1"]);
+			expect(term.getCursor()).toEqual({ row: 3, col: 6 });
+			expect(tui.renders).toBe(tuiRenders);
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("falls back safely when marker-bearing output changes row count", async () => {
+		const term = new VirtualTerminal(40, 5, 1_000);
+		const writes = captureWrites(term);
+		const scheduler = new StressRenderScheduler();
+		const tui = new RenderCountingTUI(term, true, { renderScheduler: scheduler });
+		const head = new CountingLines(["head"]);
+		const editor = new CountingLines([`one${CURSOR_MARKER}`]);
+		tui.addChild(head);
+		tui.addChild(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const tuiRenders = tui.renders;
+			writes.length = 0;
+
+			editor.set([`one${CURSOR_MARKER}`, `two${CURSOR_MARKER}`]);
+			tui.requestDirectWrite(editor);
+			await scheduler.drain(term);
+
+			expect(strip(term.getViewport())).toEqual(["head", "one", "two", "", ""]);
+			expect(term.getCursor()).toEqual({ row: 2, col: 3 });
+			expect(tui.renders).toBeGreaterThan(tuiRenders);
+			expect(writes.join("")).not.toContain(CURSOR_MARKER);
 		} finally {
 			tui.stop();
 			await term.flush();
