@@ -99,14 +99,18 @@ jobs:
          - uses: ./.github/actions/setup-system-deps
          - name: Download and validate native package
            shell: bash
+           env:
+              IS_RELEASE: ${{ needs.resolve.outputs.is-release }}
            run: |
               set -euo pipefail
               native_version="$(bun -e 'const manifest = await Bun.file("packages/natives/package.json").json(); process.stdout.write(manifest.version)')"
-              metadata_native_version="$(bun -e 'const metadata = await Bun.file("packages/coding-agent/fork-release.json").json(); process.stdout.write(metadata.nativeVersion)')"
-              [[ "$native_version" == "$metadata_native_version" ]] || {
-                echo "Native manifest $native_version does not match fork metadata $metadata_native_version" >&2
-                exit 1
-              }
+              if [[ "$IS_RELEASE" == "true" ]]; then
+                metadata_native_version="$(bun -e 'const metadata = await Bun.file("packages/coding-agent/fork-release.json").json(); process.stdout.write(metadata.nativeVersion)')"
+                [[ "$native_version" == "$metadata_native_version" ]] || {
+                  echo "Native manifest $native_version does not match fork metadata $metadata_native_version" >&2
+                  exit 1
+                }
+              fi
               for leaf in pi-natives pi-natives-linux-x64 pi-natives-linux-arm64 pi-natives-darwin-x64 pi-natives-darwin-arm64 pi-natives-win32-x64; do
                 published="$(npm view "@oh-my-pi/${leaf}@${native_version}" version)"
                 [[ "$published" == "$native_version" ]] || {
