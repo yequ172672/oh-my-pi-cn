@@ -46,7 +46,7 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 }
 
-function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle {
+function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
@@ -59,6 +59,7 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => undefined,
+		extensionRunner,
 	} as unknown as AgentSession;
 	return { session, observer: () => observer };
 }
@@ -129,6 +130,28 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
+		const cwd = makeTempDir("@pi-revive-ext-init-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		const initialize = vi.fn();
+		const onError = vi.fn();
+		const emit = vi.fn(async () => undefined);
+		const extensionRunner = { initialize, onError, emit };
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(initialize).toHaveBeenCalledTimes(1);
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
+	});
+
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
 		const sessionFile = await createPersistedSession(cwd, true);

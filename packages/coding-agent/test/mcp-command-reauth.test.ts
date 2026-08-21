@@ -353,6 +353,53 @@ describe("/mcp auth commands", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	test("/mcp reauth acquires a credential when the handshake succeeds but tools need OAuth", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		// The anonymous handshake (`initialize`) succeeds; only `tools/call` is
+		// gated behind OAuth. The unauthenticated probe must not treat this as
+		// proof that reauthorization is unnecessary.
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				const url = String(input);
+				if (url === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							issuer: "https://mcp.example.com",
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+							client_id: "advertised-client",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+
+		const { controller, showError } = createController(authStorage);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+			type: "oauth",
+			access: "fresh-access",
+			tokenUrl: "https://auth.example.com/token",
+		});
+	});
+
 	test("reuses embedded DCR client secret during reauth token exchange", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();

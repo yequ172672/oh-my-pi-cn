@@ -333,7 +333,10 @@ describe("ACP lazy startup", () => {
 		const client = new TestClient();
 		let createCalls = 0;
 		const creationStarted = Promise.withResolvers<void>();
-		const blockedCreation = Promise.withResolvers<AgentSession>();
+		const blockedCreation = Promise.withResolvers<{
+			session: AgentSession;
+			setToolUIContext: () => void;
+		}>();
 
 		const agentConnection = new ClientSideConnection(
 			() => client,
@@ -347,7 +350,10 @@ describe("ACP lazy startup", () => {
 				if (createCalls === 1) {
 					return await blockedCreation.promise;
 				}
-				return new LazyFakeSession(cwd) as unknown as AgentSession;
+				return {
+					session: new LazyFakeSession(cwd) as unknown as AgentSession,
+					setToolUIContext: () => {},
+				};
 			},
 		);
 
@@ -365,7 +371,10 @@ describe("ACP lazy startup", () => {
 			await creationStarted.promise;
 			expect(createCalls).toBe(1);
 
-			blockedCreation.resolve(new LazyFakeSession("/tmp/acp-lazy-startup") as unknown as AgentSession);
+			blockedCreation.resolve({
+				session: new LazyFakeSession("/tmp/acp-lazy-startup") as unknown as AgentSession,
+				setToolUIContext: () => {},
+			});
 			const sessionResponse = await newSessionPromise;
 			expect(sessionResponse.sessionId).toEqual(expect.any(String));
 		} finally {
@@ -439,7 +448,7 @@ describe("ACP lazy startup", () => {
 					},
 					settings,
 					runAcpMode: async createAcpSession => {
-						session = await createAcpSession(cwd);
+						session = (await createAcpSession(cwd)).session;
 						throw new Error("stop test ACP mode");
 					},
 				},

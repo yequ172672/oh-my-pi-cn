@@ -20,7 +20,7 @@ const SUMMARY = "Earlier the user fixed the login TTL bug.";
 
 function makeComponent(images?: ImageContent[]): CompactionSummaryMessageComponent {
 	return new CompactionSummaryMessageComponent(
-		createCompactionSummaryMessage(SUMMARY, 84000, new Date().toISOString(), undefined, undefined, images),
+		createCompactionSummaryMessage(SUMMARY, 84000, new Date().toISOString(), { images }),
 	);
 }
 
@@ -34,6 +34,29 @@ describe("CompactionSummaryMessageComponent", () => {
 		// The rule spans the full width and hides the summary body.
 		expect(Bun.stringWidth(rule)).toBe(80);
 		expect(rule).not.toContain(SUMMARY);
+	});
+
+	it("names the compaction method and the before → after amounts on the divider", () => {
+		const component = new CompactionSummaryMessageComponent(
+			createCompactionSummaryMessage(SUMMARY, 256_000, new Date().toISOString(), {
+				method: "remote",
+				tokensAfter: 20_000,
+			}),
+		);
+		const rule = Bun.stripANSI(component.render(80)[1]);
+		expect(rule).toContain("remote-compacted");
+		expect(rule).toContain("256K→20K");
+		expect(rule).toContain("ctrl+o");
+	});
+
+	it("labels a handoff-method compaction as handed-off", () => {
+		const component = new CompactionSummaryMessageComponent(
+			createCompactionSummaryMessage(SUMMARY, 84_000, new Date().toISOString(), { method: "handoff" }),
+		);
+		const rule = Bun.stripANSI(component.render(80)[1]);
+		expect(rule).toContain("handed-off");
+		// No tokensAfter recorded → no amount badge.
+		expect(rule).not.toContain("→");
 	});
 
 	it("expanded: reveals the summary (and snapcompact frame count) below the divider", () => {

@@ -45,7 +45,7 @@ export interface ParsedSlashCommand {
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
  */
-export type SlashCommandResult = undefined | { consumed: true } | { prompt: string };
+export type SlashCommandResult = undefined | { consumed: true; agentInvoked?: boolean } | { prompt: string };
 
 /**
  * Runtime visible to slash-command handlers that run in text/ACP mode.
@@ -70,6 +70,28 @@ export interface SlashCommandRuntime {
 	 * consistent view after plugin or project-scope changes.
 	 */
 	reloadPlugins: () => Promise<void>;
+	/**
+	 * Keep the host's prompt turn open until the session goes idle.
+	 *
+	 * Provided only by the ACP dispatcher, whose prompt turn owns the event
+	 * subscription and settles as soon as a builtin reports consumed: work a
+	 * command merely *schedules* (e.g. `/retry`'s post-prompt continuation)
+	 * would otherwise stream into an already-unsubscribed turn and be dropped.
+	 *
+	 * Deliberately absent in RPC and TUI: both observe the continuation through
+	 * their own always-on session subscription, and `RpcClient.prompt()`
+	 * documents an immediate return — blocking it there would also park the
+	 * serialized command queue, so a client could not `abort` the very turn it
+	 * is waiting on.
+	 */
+	keepTurnOpenUntilIdle?: () => Promise<void>;
+	/**
+	 * Start a local command operation without holding the host's prompt response.
+	 *
+	 * RPC provides this for provider-backed commands because its prompt API must
+	 * return immediately and leave the serialized queue free for `abort`.
+	 */
+	runCommandInBackground?: (task: () => Promise<void>) => void;
 	notifyTitleChanged?: () => Promise<void> | void;
 	notifyConfigChanged?: () => Promise<void> | void;
 }
@@ -140,4 +162,4 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */
-export type AcpBuiltinSlashCommandResult = false | { consumed: true } | { prompt: string };
+export type AcpBuiltinSlashCommandResult = false | { consumed: true; agentInvoked?: boolean } | { prompt: string };

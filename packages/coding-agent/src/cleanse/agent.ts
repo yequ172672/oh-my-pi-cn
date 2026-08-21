@@ -2,11 +2,13 @@ import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
+import { t } from "../i18n";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { runStructuredSubagent } from "../task/structured-subagent";
+import type { AgentProgress } from "../task/types";
 import type { ToolSession } from "../tools";
 import { EventBus } from "../utils/event-bus";
 import type { CustomCleanseCheckerSpec } from "./checkers";
@@ -49,6 +51,8 @@ const DISCOVERY_SCHEMA = {
 /** Hooks used by the standalone command to render subagent lifecycle progress. */
 export interface CleanseAgentHooks {
 	onStart?(name: string, assignment: CleanseAssignment): void;
+	/** Streaming progress snapshots from a running repair subagent. */
+	onProgress?(name: string, assignment: CleanseAssignment, progress: AgentProgress): void;
 	onFinish?(outcome: CleanseAgentOutcome, assignment: CleanseAssignment): void;
 }
 
@@ -79,7 +83,7 @@ export async function createCleanseAgentRuntime(options: {
 	await modelRegistry.refresh();
 	const resolved = resolveCliModel({ cliModel: options.model, modelRegistry, settings });
 	if (resolved.error || !resolved.model) {
-		throw new Error(resolved.error ?? `Model "${options.model}" not found`);
+		throw new Error(resolved.error ?? t("cleanse.modelNotFound", { model: options.model }));
 	}
 	const modelSelector = resolved.selector ?? formatModelString(resolved.model);
 	const modelDisplay = formatModelString(resolved.model);
@@ -92,7 +96,7 @@ export async function createCleanseAgentRuntime(options: {
 	});
 	await sessionManager.ensureOnDisk();
 	const sessionFile = sessionManager.getSessionFile();
-	if (!sessionFile) throw new Error("Cleanse session could not be persisted");
+	if (!sessionFile) throw new Error(t("cleanse.sessionPersistenceFailed"));
 	const eventBus = new EventBus();
 	const toolSession: ToolSession = {
 		cwd,
@@ -135,7 +139,7 @@ export async function createCleanseAgentRuntime(options: {
 				enableIrc: false,
 				signal,
 			});
-			if (result.result.error) throw new Error(`Checker discovery failed: ${result.result.error}`);
+			if (result.result.error) throw new Error(t("cleanse.checkerDiscoveryFailed", { reason: result.result.error }));
 			return parseDiscoverySpecs(result.result.structuredOutput?.data);
 		},
 		async dispatch(
@@ -168,6 +172,7 @@ export async function createCleanseAgentRuntime(options: {
 						enableLsp: true,
 						enableIrc: true,
 						signal: workerSignal,
+						onProgress: progress => options.hooks?.onProgress?.(name, assignment, progress),
 					});
 					const outcome: CleanseAgentOutcome = {
 						name,
@@ -185,7 +190,12 @@ export async function createCleanseAgentRuntime(options: {
 			for (let index = 0; index < settled.results.length; index += 1) {
 				const result = settled.results[index];
 				if (!result) {
-					outcomes.push({ name: `CleanseW${wave}A${index + 1}`, success: false, output: "", error: "Cancelled" });
+					outcomes.push({
+						name: `CleanseW${wave}A${index + 1}`,
+						success: false,
+						output: "",
+						error: t("cleanse.cancelledShort"),
+					});
 				} else if (result.status === "fulfilled") {
 					outcomes.push(result.value);
 				} else {

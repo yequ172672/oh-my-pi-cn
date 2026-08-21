@@ -19,6 +19,9 @@ import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
 // throwaway repos; any leak from `~/.gitconfig` or system config (LFS filters,
@@ -433,8 +436,14 @@ describe("github tool", () => {
 		expect(text).toContain("Topics: cli, github");
 	});
 
-	it("reads repository files through the GitHub contents API", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue('{"version":"16.3.11"}\n');
+	it("reads repository text through GitHub's JSON contents API", async () => {
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "base64",
+			size: 20,
+			content: Buffer.from('{"version":"16.3.11"}\n').toString("base64"),
+			html_url: "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/package.json",
+		});
 		const tool = new GithubTool(createSession());
 		const result = await tool.execute("file-read", {
 			op: "file_read",
@@ -445,7 +454,7 @@ describe("github tool", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toBe('{"version":"16.3.11"}\n');
-		expect(textSpy).toHaveBeenCalledWith(
+		expect(jsonSpy).toHaveBeenCalledWith(
 			"/tmp/test",
 			[
 				"api",
@@ -453,13 +462,64 @@ describe("github tool", () => {
 				"--method",
 				"GET",
 				"-H",
-				"Accept: application/vnd.github.raw+json",
+				"Accept: application/vnd.github+json",
+				"-H",
+				"Accept-Encoding: identity",
 				"-f",
 				"ref=main",
 			],
 			undefined,
 			{ repoProvided: true, trimOutput: false },
 		);
+	});
+
+	it("returns GitHub images as model image content", async () => {
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "base64",
+			size: Buffer.byteLength(TINY_PNG_BASE64, "base64"),
+			content: TINY_PNG_BASE64,
+			html_url: "https://github.com/anomalyco/opencode/blob/main/packages/web/src/assets/lander/screenshot.png",
+		});
+		const tool = new GithubTool(
+			createSession("/tmp/test", Settings.isolated({ "github.enabled": true, "images.autoResize": false })),
+		);
+		const result = await tool.execute("file-read", {
+			op: "file_read",
+			repo: "anomalyco/opencode",
+			branch: "main",
+			path: "packages/web/src/assets/lander/screenshot.png",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Image file: packages/web/src/assets/lander/screenshot.png");
+		expect(result.content).toContainEqual({
+			type: "image",
+			data: TINY_PNG_BASE64,
+			mimeType: "image/png",
+		});
+	});
+
+	it("identifies files GitHub returns without inline bytes", async () => {
+		const sourceUrl = "https://github.com/anomalyco/opencode/blob/main/packages/web/src/assets/lander/screenshot.png";
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "none",
+			size: 2 * 1024 * 1024,
+			html_url: sourceUrl,
+		});
+		const tool = new GithubTool(createSession());
+		const result = await tool.execute("file-read", {
+			op: "file_read",
+			repo: "anomalyco/opencode",
+			branch: "main",
+			path: "packages/web/src/assets/lander/screenshot.png",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("GitHub did not return file bytes");
+		expect(text).toContain("packages/web/src/assets/lander/screenshot.png");
+		expect(text).toContain(sourceUrl);
 	});
 
 	it("creates a pull request via gh and renders the resulting summary", async () => {

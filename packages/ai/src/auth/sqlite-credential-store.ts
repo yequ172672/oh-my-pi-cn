@@ -8,7 +8,13 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { getAgentDbPath, getDbBusyTimeoutMs, logger } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	logger,
+} from "@oh-my-pi/pi-utils";
 import type {
 	AuthCredential,
 	AuthCredentialStore,
@@ -87,29 +93,10 @@ const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
 
-/**
- * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
- * variants `SQLITE_BUSY_RECOVERY` (concurrent WAL recovery), `SQLITE_BUSY_SNAPSHOT`,
- * and `SQLITE_BUSY_TIMEOUT`. All warrant the same backoff-and-retry treatment.
- */
-export function isSqliteBusyError(err: unknown): boolean {
-	if (err === null || typeof err !== "object") return false;
-	const code = (err as { code?: unknown }).code;
-	return typeof code === "string" && code.startsWith("SQLITE_BUSY");
-}
-
-/**
- * SQLite's unrecoverable-corruption result codes — the `SQLITE_CORRUPT` family
- * (base plus extended variants like `SQLITE_CORRUPT_VTAB` / `SQLITE_CORRUPT_INDEX`)
- * and `SQLITE_NOTADB` (the file header is not a database). Unlike
- * {@link isSqliteBusyError}, these never clear by retrying: the store must be
- * repaired or replaced, so callers latch and stop touching it.
- */
-export function isSqliteCorruptionError(err: unknown): boolean {
-	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	const code = err.code;
-	return typeof code === "string" && (code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB");
-}
+// SQLite error classifiers live in pi-utils so the credential store and the
+// model cache share one implementation; re-exported here to preserve the
+// pre-existing `@oh-my-pi/pi-ai/auth-storage` surface.
+export { isSqliteBusyError, isSqliteCorruptionError };
 
 function normalizeStoredAccountId(accountId: string | null | undefined): string | null {
 	const normalized = accountId?.trim();

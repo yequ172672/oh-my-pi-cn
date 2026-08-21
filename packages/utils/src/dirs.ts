@@ -678,6 +678,11 @@ export function getGithubCacheDbPath(): string {
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
 
+/** Get the legacy Pi extension parse cache database path. */
+export function getLegacyPiExtensionCacheDbPath(): string {
+	return dirs.rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");
+}
+
 /**
  * Get the encrypted auth-broker snapshot cache path (~/.omp/cache/auth-broker-snapshot.enc).
  * Honors the `OMP_AUTH_BROKER_SNAPSHOT_CACHE` env var when set so tests and
@@ -854,10 +859,20 @@ export function getSecretPlaceholderKeyPath(): string {
 	return keyPath;
 }
 
+/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
+export function getDaemonRuntimeRoot(): string {
+	return dirs.rootSubdir(path.join("run", "daemons"), "state");
+}
+
 /** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
 export function getDaemonRuntimeDir(projectDir: string): string {
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return dirs.rootSubdir(path.join("run", "daemons", key), "state");
+	return path.join(getDaemonRuntimeRoot(), key);
+}
+
+/** Root directory containing every machine-global daemon service scope. */
+export function getGlobalDaemonRuntimeRoot(): string {
+	return path.join(getBaseConfigRoot(), "run", "daemons", "global");
 }
 
 /** Get a profile-independent runtime directory for a machine-global daemon service. */
@@ -865,7 +880,7 @@ export function getGlobalDaemonRuntimeDir(service: string): string {
 	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
 		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
 	}
-	return path.join(getBaseConfigRoot(), "run", "daemons", "global", service);
+	return path.join(getGlobalDaemonRuntimeRoot(), service);
 }
 
 /** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */

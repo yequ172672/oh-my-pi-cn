@@ -1,5 +1,6 @@
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
+import { isGeminiModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl } from "../types";
 import { GEMINI_CLI_VARIANT_COLLAPSE_TABLE } from "../variant-collapse";
@@ -88,18 +89,19 @@ export function googleGeminiCliModelManagerOptions(
 					fetchDynamicModels: async () => {
 						const models = await fetchAntigravityDiscoveryModels({
 							token,
-							endpoint,
 							fetcher: toDiscoveryFetch(config?.fetch),
 							collapseTable: GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
 						});
 						if (models === null) {
 							return null;
 						}
-						return models.map(m => ({
-							...m,
-							provider: "google-gemini-cli" as const,
-							baseUrl: endpoint,
-						}));
+						return models
+							.filter(m => isGeminiModelId(m.id))
+							.map(m => ({
+								...m,
+								provider: "google-gemini-cli" as const,
+								baseUrl: endpoint,
+							}));
 					},
 				}
 			: undefined),

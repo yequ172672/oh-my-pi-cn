@@ -26,6 +26,7 @@ import {
 	recoverStatsPort,
 	STATS_DASHBOARD_HEADER,
 	STATS_DASHBOARD_HOSTNAME,
+	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
 
@@ -306,10 +307,16 @@ async function handleStatic(requestPath: string): Promise<Response> {
 	return new Response("Not Found", { status: 404 });
 }
 
-function createDashboardServer(port: number) {
+/** Format a dashboard origin, including brackets required by IPv6 literals. */
+export function formatStatsDashboardUrl(hostname: string, port: number): string {
+	const urlHostname = hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
+	return `http://${urlHostname}:${port}`;
+}
+
+function createDashboardServer(port: number, hostname: string) {
 	const server = Bun.serve({
 		port,
-		hostname: STATS_DASHBOARD_HOSTNAME,
+		hostname,
 		async fetch(req) {
 			const url = new URL(req.url);
 			const path = url.pathname;
@@ -318,6 +325,7 @@ function createDashboardServer(port: number) {
 			// recognize this dashboard without allowing cross-origin API reads.
 			const dashboardHeaders: Record<string, string> = {
 				[STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION,
+				[STATS_DASHBOARD_HOSTNAME_HEADER]: hostname,
 			};
 
 			if (req.method === "OPTIONS") {
@@ -358,37 +366,40 @@ function createDashboardServer(port: number) {
 /**
  * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
  */
-export async function startServer(port = 3847): Promise<{ hostname: string; port: number; stop: () => void }> {
+export async function startServer(
+	port = 3847,
+	hostname = STATS_DASHBOARD_HOSTNAME,
+): Promise<{ hostname: string; port: number; stop: () => void }> {
 	await ensureClientBuild();
-	const preparation = await prepareStatsPort(port);
+	const preparation = await prepareStatsPort(port, hostname);
 	if (preparation === "reuse") {
-		return { hostname: STATS_DASHBOARD_HOSTNAME, port, stop: () => {} };
+		return { hostname, port, stop: () => {} };
 	}
 
 	try {
-		const server = createDashboardServer(port);
+		const server = createDashboardServer(port, hostname);
 		return {
-			hostname: STATS_DASHBOARD_HOSTNAME,
+			hostname,
 			port: server.port ?? port,
 			stop: () => server.stop(),
 		};
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
 
-		const recovery = await recoverStatsPort(port);
+		const recovery = await recoverStatsPort(port, hostname);
 		if (recovery === "reuse") {
-			return { hostname: STATS_DASHBOARD_HOSTNAME, port, stop: () => {} };
+			return { hostname, port, stop: () => {} };
 		}
 
 		try {
-			const server = createDashboardServer(port);
+			const server = createDashboardServer(port, hostname);
 			return {
-				hostname: STATS_DASHBOARD_HOSTNAME,
+				hostname,
 				port: server.port ?? port,
 				stop: () => server.stop(),
 			};
 		} catch (retryError) {
-			throw new Error(`Failed to start stats dashboard on port ${port} after reclaiming it.`, {
+			throw new Error(`Failed to start stats dashboard on ${hostname}:${port} after reclaiming it.`, {
 				cause: retryError,
 			});
 		}

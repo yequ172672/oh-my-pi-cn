@@ -72,6 +72,11 @@ const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
 /** OpenRouter's DeepSeek route accepts only `high`. */
 const HIGH_ONLY_REASONING_EFFORTS: readonly Effort[] = [Effort.High];
 /**
+ * Qwen 3.8+ open-weight chat template: prompt-steered `reasoning_effort`
+ * kwarg with exactly three wire tiers (template default is `xhigh`).
+ */
+const QWEN38_TEMPLATE_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.XHigh];
+/**
  * Five wire tiers with a `low` floor: GPT-5.6+, Anthropic adaptive models
  * with the real xhigh tier (Opus 4.7+, Sonnet 5+, Fable/Mythos 5), and the
  * Fire Pass Kimi router (distinct xhigh and max budgets).
@@ -179,7 +184,9 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		thinking.supportsDisplay === undefined &&
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
-	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
+	const needsRequiresEffort =
+		thinking.requiresEffort === undefined &&
+		(impliesMandatoryReasoning(parsed, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
 	const needsDefaultLevel =
 		thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id));
 	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
@@ -232,7 +239,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	) {
 		config.supportsDisplay = true;
 	}
-	if (impliesMandatoryReasoning(parsed, spec.id)) {
+	if (impliesMandatoryReasoning(parsed, spec.id) || isQwenTemplateReasoningEffortCompat(compat)) {
 		config.requiresEffort = true;
 	}
 	return config;
@@ -376,6 +383,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (spec.provider === "ollama") {
 		return OLLAMA_REASONING_EFFORTS;
 	}
+	// Qwen 3.8+ served through a local llama.cpp-style backend: the chat
+	// template's prompt-steered `reasoning_effort` kwarg accepts exactly
+	// low/medium/xhigh (and thinking cannot be turned off — the official 3.8
+	// template raises on `enable_thinking: false`, hence requiresEffort).
+	if (isOpenAICompatReasoningApi(spec.api) && isQwenTemplateReasoningEffortCompat(compat)) {
+		return QWEN38_TEMPLATE_REASONING_EFFORTS;
+	}
 	if (
 		(isOpenAICompatReasoningApi(spec.api) || (spec.api === "ollama-chat" && spec.provider === "ollama-cloud")) &&
 		isDeepseekReasoningModel(spec)
@@ -482,6 +496,12 @@ function isOpenRouterThinkingFormat(compat: CompatOf<Api>): boolean {
 
 function isZaiThinkingFormat(compat: CompatOf<Api>): boolean {
 	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "zai";
+}
+/** Resolved-compat gate for the Qwen 3.8+ local template `reasoning_effort` dialect. */
+function isQwenTemplateReasoningEffortCompat(compat: CompatOf<Api>): boolean {
+	return (
+		compat !== undefined && "qwenTemplateReasoningEffort" in compat && compat.qwenTemplateReasoningEffort === true
+	);
 }
 
 function inferDetectedEffortMap<TApi extends Api>(
@@ -796,11 +816,23 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 	return effort;
 }
 
-/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values. */
-export function mapEffortToGoogleThinkingLevel(effort: Effort): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
+ * When a collapsed family routes `minimal` onto the same wire id as `low`
+ * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
+ * `MINIMAL` on those `-low` SKUs.
+ */
+export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
+	effort: Effort,
+	model?: ApiModel<TApi>,
+): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+	if (effort === Effort.Minimal) {
+		const routing = model?.thinking?.effortRouting;
+		if (routing?.[Effort.Minimal] && routing[Effort.Minimal] === routing[Effort.Low]) {
+			return "LOW";
+		}
+		return "MINIMAL";
+	}
 	switch (effort) {
-		case Effort.Minimal:
-			return "MINIMAL";
 		case Effort.Low:
 			return "LOW";
 		case Effort.Medium:

@@ -4,6 +4,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 function writeArgs(lineCount: number) {
 	return {
@@ -30,6 +31,8 @@ function plainBuffer(term: VirtualTerminal): string[] {
 		.map(row => Bun.stripANSI(row).trimEnd())
 		.filter(Boolean);
 }
+
+withoutTerminalMultiplexer();
 
 describe("ToolExecutionComponent write repaint seam", () => {
 	const components: ToolExecutionComponent[] = [];

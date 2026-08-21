@@ -15,6 +15,7 @@ import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provide
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+	CURSOR_VARIANT_COLLAPSE_TABLE,
 	collapseEffortVariants,
 	collapseEffortVariantsAcrossProviders,
 	DEVIN_VARIANT_COLLAPSE_TABLE,
@@ -656,6 +657,139 @@ describe("Devin tier routing", () => {
 	});
 });
 
+describe("Cursor Grok tier routing (issue #8803)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels + bundled references mark these reasoning:false;
+			// collapse must still recognize the effort ladder.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const RAW_SIBLINGS = [
+		"cursor-grok-4.5-high",
+		"cursor-grok-4.5-high-fast",
+		"cursor-grok-4.5-low",
+		"cursor-grok-4.5-low-fast",
+		"cursor-grok-4.5-medium",
+		"cursor-grok-4.5-medium-fast",
+		"cursor-grok-4.6-high",
+		"cursor-grok-4.6-high-fast",
+		"cursor-grok-4.6-low",
+		"cursor-grok-4.6-low-fast",
+		"cursor-grok-4.6-medium",
+		"cursor-grok-4.6-medium-fast",
+		"cursor-grok-4.6-xhigh",
+		"cursor-grok-4.6-xhigh-fast",
+	];
+
+	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+		]);
+
+		const g46 = collapsed.find(model => model.id === "cursor-grok-4.6");
+		if (!g46) throw new Error("cursor-grok-4.6 did not collapse");
+		expect(g46.name).toBe("Grok 4.6");
+		// Effort route forces reasoning even though every member said false.
+		expect(g46.reasoning).toBe(true);
+		expect(g46.thinking?.mode).toBe("effort");
+		expect(g46.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(g46.thinking?.requiresEffort).toBe(true);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.XHigh)).toBe("cursor-grok-4.6-xhigh");
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.Low)).toBe("cursor-grok-4.6-low");
+		expect(resolveWireModelId(model("cursor-grok-4.6-fast"), Effort.High)).toBe("cursor-grok-4.6-high-fast");
+		expect(resolveWireModelId(model("cursor-grok-4.5"), Effort.Medium)).toBe("cursor-grok-4.5-medium");
+		// 4.5 has no xhigh sibling: the ceiling stays at high.
+		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+	});
+});
+
+describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels marks these reasoning:false; the effort route
+			// must still promote the collapsed family to reasoning.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const TIERS = ["none", "low", "medium", "high", "xhigh", "max"];
+	const RAW_SIBLINGS = ["luna", "sol", "terra"].flatMap(variant =>
+		TIERS.flatMap(tier => [`gpt-5.6-${variant}-${tier}`, `gpt-5.6-${variant}-${tier}-fast`]),
+	);
+
+	it("collapses the 36 effort siblings into six logical models, split by the -fast lane", () => {
+		expect(RAW_SIBLINGS).toHaveLength(36);
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"gpt-5.6-luna",
+			"gpt-5.6-luna-fast",
+			"gpt-5.6-sol",
+			"gpt-5.6-sol-fast",
+			"gpt-5.6-terra",
+			"gpt-5.6-terra-fast",
+		]);
+
+		const luna = collapsed.find(model => model.id === "gpt-5.6-luna");
+		if (!luna) throw new Error("gpt-5.6-luna did not collapse");
+		expect(luna.name).toBe("GPT-5.6 Luna");
+		// Effort route forces reasoning even though every member said false.
+		expect(luna.reasoning).toBe(true);
+		expect(luna.thinking?.mode).toBe("effort");
+		expect(luna.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		// `-none` is the thinking-off tier; efforts route onto the standard lane.
+		expect(resolveWireModelId(model("gpt-5.6-sol"), undefined)).toBe("gpt-5.6-sol-none");
+		expect(resolveWireModelId(model("gpt-5.6-sol"), Effort.Max)).toBe("gpt-5.6-sol-max");
+		expect(resolveWireModelId(model("gpt-5.6-sol"), Effort.Low)).toBe("gpt-5.6-sol-low");
+		// The -fast lane is a distinct SKU routing onto its own sibling ids.
+		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.High)).toBe("gpt-5.6-terra-high-fast");
+		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.XHigh)).toBe("gpt-5.6-terra-xhigh-fast");
+	});
+});
+
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
@@ -886,17 +1020,31 @@ describe("antigravity discovery collapsing", () => {
 		});
 	});
 
-	it("keeps collapsed routing through the gemini-cli re-provision", async () => {
+	it("discovers Gemini models through Antigravity before provisioning Cloud Code Assist", async () => {
+		const requestedUrls: string[] = [];
+		const geminiCliFetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) => {
+				const url = String(input);
+				requestedUrls.push(url);
+				if (!url.startsWith(ANTIGRAVITY_PRIMARY_ENDPOINT)) {
+					return Promise.resolve(new Response("Forbidden", { status: 403 }));
+				}
+				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
 		const options = googleGeminiCliModelManagerOptions({
 			oauthToken: "t",
 			endpoint: "https://cca.test",
-			fetch: fetcher,
+			fetch: geminiCliFetcher,
 		});
 		const models = await options.fetchDynamicModels?.();
 
+		expect(requestedUrls).toContain(`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`);
+		expect(models?.some(m => m.id === "claude-sonnet-4-6")).toBe(false);
+		expect(models?.every(m => m.baseUrl === "https://cca.test")).toBe(true);
 		const flash = models?.find(m => m.id === "gemini-3.5-flash");
 		expect(flash?.provider).toBe("google-gemini-cli");
-		expect(flash?.baseUrl).toBe("https://cca.test");
 		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
 		expect(flash?.thinking?.effortRouting?.off).toBe("gemini-3.5-flash-extra-low");
 		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");

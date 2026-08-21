@@ -634,5 +634,17 @@ export const zhCNUiText: Readonly<Record<string, string>> = {
 	"Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)":
 		"试着以 `->` 开始提示词，并写成列表（1. 做 X，2. 做 Y）",
 	"Press shift+tab to cycle through reasoning effort levels": "按 Shift+Tab 循环推理力度级别",
+	"Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — esc cancels":
+		"Lint/类型错误越积越多？`omp cleanse`（或直接使用 /cleanse）会查找项目诊断并由并行子代理修复——按 Esc 可取消",
+	"Choose composer shape": "选择输入框样式",
+	"Pick the prompt and status line layout for your workflow.": "选择适合当前工作流的输入框和状态栏布局。",
+	"Select a layout; live preview updates below. Press Enter to confirm.":
+		"选择一种布局；下方预览会实时更新。按 Enter 确认。",
+	"Ask anything, edit files, run tools": "提出问题、编辑文件或运行工具",
+	"Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back":
+		"单击切换 · 拖动已选项重新排序 · ←/→ 移动 · 1-9 定位 · Esc 返回",
+	"Click/Enter/Space to toggle · Esc to go back": "单击/Enter/空格切换 · Esc 返回",
+	"Tab to switch tabs": "按 Tab 切换标签页",
+	TODO: "待办事项",
 	"Please use nerdfont 😭.": "请使用 Nerd Font 😭。",
 };

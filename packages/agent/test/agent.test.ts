@@ -279,7 +279,11 @@ describe("Agent", () => {
 	});
 	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 25 });
+		// Generous budget: the loop checks the deadline before invoking dequeue
+		// hooks, so the mock roundtrip must beat it even on starved CI runners.
+		// The hook itself parks until the deadline timer aborts the loop signal,
+		// so the expiry-during-hook branch stays exercised.
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 1_000 });
 		let hookSignal: AbortSignal | undefined;
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the active loop signal");
@@ -297,7 +301,8 @@ describe("Agent", () => {
 		expect(agent.peekFollowUpQueue()).toHaveLength(1);
 	});
 	it("keeps queued work when continue() reaches its deadline inside a dequeue hook", async () => {
-		const agent = new Agent({ deadline: Date.now() + 25 });
+		// Same starvation guard as above: hook entry must precede expiry.
+		const agent = new Agent({ deadline: Date.now() + 1_000 });
 		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the deadline-aware dequeue signal");

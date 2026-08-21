@@ -369,6 +369,16 @@ export interface CredentialRankingStrategy {
 	 */
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
 	/**
+	 * Restrict limits for the opt-in, non-destructive usage-reserve health
+	 * check ({@link AuthStorage.getModelUsageHealth}). Distinct from
+	 * {@link scopeLimits}, which gates credential-wide hard blocks: a provider
+	 * whose model/tier counters are trusted only at confirmed exhaustion for
+	 * hard-blocking can still expose them here so the reserve margin protects
+	 * the mapped quota before it hits the cap. Falls back to {@link scopeLimits}
+	 * when omitted.
+	 */
+	scopeLimitsForReserve?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
+	/**
 	 * Return a provider-local backoff scope for the requested model. Providers
 	 * with backend-specific quotas use this so one exhausted model family does
 	 * not block unrelated families on the same OAuth credential.

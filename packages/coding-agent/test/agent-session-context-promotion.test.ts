@@ -488,7 +488,7 @@ describe("AgentSession context promotion", () => {
 		}
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
-			"compaction.strategy": "snapcompact",
+			"compaction.methodOrder": ["snapcompact", "soft"],
 			"compaction.keepRecentTokens": 1,
 			"compaction.thresholdPercent": -1,
 			"contextPromotion.enabled": false,

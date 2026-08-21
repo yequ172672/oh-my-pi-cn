@@ -16,6 +16,8 @@ import {
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
 	isKimiModelId,
+	isMuseSparkModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
@@ -540,12 +542,15 @@ const OPENAI_NON_RESPONSES_PREFIXES = [
 	"gpt-realtime",
 ] as const;
 
-function isLikelyOpenAIResponsesModelId(id: string, references: Map<string, ModelSpec<"openai-responses">>): boolean {
+function isLikelyOpenAIResponsesModelId(
+	id: string,
+	references?: ReadonlyMap<string, ModelSpec<"openai-responses">>,
+): boolean {
 	const trimmed = id.trim();
 	if (!trimmed) {
 		return false;
 	}
-	if (references.has(trimmed)) {
+	if (references?.has(trimmed)) {
 		return true;
 	}
 	const normalized = trimmed.toLowerCase();
@@ -1073,10 +1078,61 @@ export interface GmiCloudModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * Map a discovered GMI Cloud model to a full spec.
+ *
+ * GMI's `/v1/models` returns only bare `{id}` rows, so discovery defaults carry
+ * no limits, reasoning, or thinking metadata. When a gmi-cloud bundled
+ * reference exists (the seeded default) it supplies GMI's published tariff and
+ * limits directly. Every other id is an open-weight model GMI resells under its
+ * canonical id (`deepseek-ai/…`, `moonshotai/…`, `zai-org/…`, `Qwen/…`), so its
+ * intrinsic capabilities — context window, output limit, reasoning, thinking
+ * ladder — are recovered from any bundled upstream entry via the canonical
+ * reference index. Pricing is deliberately never borrowed across providers:
+ * GMI's per-model tariff is unknown for these ids, so cost stays zeroed rather
+ * than inheriting another provider's rate.
+ */
+function mapGmiCloudModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	if (reference) {
+		return mapWithBundledReference(entry, defaults, reference);
+	}
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
+		| ModelSpec<"openai-completions">
+		| undefined;
+	if (!canonical) {
+		return { ...defaults, name: toModelName(entry.name, defaults.name) };
+	}
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		...(canonical.thinking && { thinking: canonical.thinking }),
+		contextWindow,
+		maxTokens,
+	};
+}
+
 export function gmiCloudModelManagerOptions(
 	config?: GmiCloudModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("gmi-cloud", GMI_CLOUD_BASE_URL, config);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "gmi-cloud",
+		defaultBaseUrl: GMI_CLOUD_BASE_URL,
+		config,
+		requireApiKey: true,
+		mapModel: mapGmiCloudModel,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,6 +2495,73 @@ function openCodeBaseUrlForApi(api: Api, basePath: string): string {
 	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
 }
 
+// Per-id API pins correcting upstream metadata mismatches on the OpenCode
+// gateways. Applied in two places: the models.dev resolver rules
+// (OPENCODE_ZEN_API_RESOLUTION / OPENCODE_GO_API_RESOLUTION) and the live
+// /v1/models discovery mapper in openCodeModelManagerOptions — the gateways
+// list ids that models.dev omits entirely (muse-spark-1.2[-contributor] on
+// opencode-go, #8957), so discovery cannot rely on bundled references alone.
+//
+// OpenCode Zen: models.dev declares minimax-m3-free (and forward-compat
+// minimax-m3) with `provider.npm = "@ai-sdk/anthropic"`, but the Zen gateway
+// only serves them at https://opencode.ai/zen/v1/chat/completions (verified
+// against the live /v1/models response — minimax-m3-free is listed there, and
+// the gateway has no /v1/messages route for it). Without this override the
+// resolver POSTs anthropic-shaped requests to /v1/messages and the UI surfaces
+// raw <invoke>/<|minimax|>/<tool_call> markup (#1617).
+const OPENCODE_ZEN_API_ID_OVERRIDES: Readonly<Record<string, Api>> = {
+	"minimax-m3": "openai-completions",
+	"minimax-m3-free": "openai-completions",
+};
+// OpenCode Go: models.dev declares minimax-m2.7 / qwen3.5-plus / qwen3.6-plus
+// (and now also minimax-m3) with `provider.npm = "@ai-sdk/anthropic"`, but
+// the OpenCode Go gateway only serves them at
+// `https://opencode.ai/zen/go/v1/chat/completions` (verified against
+// https://opencode.ai/zen/go/v1/models and the upstream endpoint table at
+// https://opencode.ai/docs/go/#endpoints — minimax-m2.5 works the same way
+// and lacks an `npm` field on models.dev so it already falls through to the
+// openai-completions default). Without this override the resolver would POST
+// anthropic-style requests to /v1/messages and the gateway would return its
+// `Page Not Found` HTML (issue #887 for the qwen/m2.7 entries; minimax-m3
+// and minimax-m3-free added under #1617 for the same root cause).
+//
+// deepseek-v4-flash is the inverse case: it falls through to
+// openai-completions by default, but the Go gateway's
+// /zen/go/v1/chat/completions route does not work for this model while
+// /zen/go/v1/responses does (user-verified against the live gateway,
+// 2026-08-08; Flash only — deepseek-v4-pro serves fine on chat completions).
+//
+// muse-spark-1.2 / muse-spark-1.2-contributor are the same inverse case, but
+// worse: models.dev does not list them under opencode-go at all, so they have
+// no bundled reference and only exist via live gateway discovery. Without the
+// discovery-side pin they default to openai-completions even though the
+// gateway only serves them at /zen/go/v1/responses (@ai-sdk/openai per
+// https://opencode.ai/docs/go/#endpoints). The completions parser then closes
+// the stream with no finish_reason on every tool-call turn (#8957).
+const OPENCODE_GO_API_ID_OVERRIDES: Readonly<Record<string, Api>> = {
+	"deepseek-v4-flash": "openai-responses",
+	"muse-spark-1.2": "openai-responses",
+	"muse-spark-1.2-contributor": "openai-responses",
+	"minimax-m2.7": "openai-completions",
+	"minimax-m3": "openai-completions",
+	"minimax-m3-free": "openai-completions",
+	"qwen3.5-plus": "openai-completions",
+	"qwen3.6-plus": "openai-completions",
+};
+
+// Billing-variant suffixes the OpenCode gateways append to a base model id
+// without changing its transport (`deepseek-v4-flash-free`,
+// `muse-spark-1.2-contributor`).
+const OPENCODE_VARIANT_SUFFIXES = ["-contributor", "-free"] as const;
+
+/** Strips a billing-variant suffix; null when `id` is not a variant. */
+function openCodeBaseModelId(id: string): string | null {
+	for (const suffix of OPENCODE_VARIANT_SUFFIXES) {
+		if (id.endsWith(suffix) && id.length > suffix.length) return id.slice(0, -suffix.length);
+	}
+	return null;
+}
+
 function openCodeModelManagerOptions(
 	providerId: "opencode-go" | "opencode-zen",
 	config?: OpenCodeModelManagerConfig,
@@ -2449,10 +2572,38 @@ function openCodeModelManagerOptions(
 	const basePath = normalizeOpenCodeBasePath(config?.baseUrl, defaultBasePath);
 	const discoveryBaseUrl = openCodeBaseUrlForApi("openai-completions", basePath);
 	const references = createBundledReferenceMap<Api>(providerId);
+	// Both gateways share one operator with identical endpoint semantics, so
+	// the sibling's bundled catalog is a routing hint for ids models.dev has
+	// not picked up under this gateway yet.
+	const siblingReferences = createBundledReferenceMap<Api>(
+		providerId === "opencode-go" ? "opencode-zen" : "opencode-go",
+	);
+	const apiOverrides = providerId === "opencode-go" ? OPENCODE_GO_API_ID_OVERRIDES : OPENCODE_ZEN_API_ID_OVERRIDES;
+	// Routes a discovered id with no same-provider metadata. models.dev lags
+	// the gateway (muse-spark-1.2[-contributor] shipped gateway-first, #8957),
+	// so borrow the openai-responses route from the sibling gateway or the
+	// billing-variant base id. Responses ONLY: openai-completions is already
+	// the default, and anthropic-messages transports genuinely diverge across
+	// gateways (e.g. minimax-m2.5), so borrowing them would import upstream
+	// metadata noise as hard routing errors.
+	const fallbackApi = (id: string, base: string | null): Api | undefined => {
+		const hints = [
+			siblingReferences.get(id)?.api,
+			base ? references.get(base)?.api : undefined,
+			base ? siblingReferences.get(base)?.api : undefined,
+		];
+		return hints.includes("openai-responses") ? "openai-responses" : undefined;
+	};
 	return {
 		providerId,
 		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl: discoveryBaseUrl }),
 		dynamicModelsAuthoritative: true,
+		// The per-id API pins are cache identity: without this, rows cached
+		// before a pin was added keep the wrong endpoint until TTL expiry
+		// (#8957 — 17.3.7 caches held muse-spark-1.2[-contributor] on chat
+		// completions after the pin shipped). Sibling-catalog drift is bounded
+		// by the 2h cache TTL instead.
+		dropCachedModelIdsOnStaticMismatch: Object.keys(apiOverrides),
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels<Api>({
@@ -2463,17 +2614,46 @@ function openCodeModelManagerOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
-						if (!reference) {
+						const base = openCodeBaseModelId(defaults.id);
+						// Pins win over bundled references (stale bundled routes
+						// must not stick), and a base-id pin covers its billing
+						// variants; the responses fallback covers gateway-first ids.
+						const api =
+							apiOverrides[defaults.id] ??
+							(base ? apiOverrides[base] : undefined) ??
+							reference?.api ??
+							fallbackApi(defaults.id, base) ??
+							defaults.api;
+						const baseUrl = openCodeBaseUrlForApi(api, basePath);
+						if (isMuseSparkModelId(defaults.id)) {
+							// Gateway lists these as bare ids with no capability
+							// metadata and no local bundled row, so the generic
+							// defaults would hide the effort dial
+							// (`reasoning: false`). Keep the pinned/fallback route
+							// and restore the documented thinking surface.
 							return {
-								...defaults,
+								...(reference ?? defaults),
+								id: defaults.id,
 								name,
+								api,
+								provider: providerId,
+								baseUrl,
+								reasoning: true,
+								input: reference?.input ?? ["text", "image"],
+								thinking: reference?.thinking ?? META_MUSE_SPARK_THINKING,
+								contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? 1_048_576),
+								maxTokens: toPositiveNumber(entry.max_completion_tokens, reference?.maxTokens ?? 131_072),
 							};
+						}
+						if (!reference) {
+							return { ...defaults, name, api, baseUrl };
 						}
 						return {
 							...reference,
 							id: defaults.id,
 							name,
-							baseUrl: openCodeBaseUrlForApi(reference.api, basePath),
+							api,
+							baseUrl,
 							contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 							maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
 						};
@@ -2980,6 +3160,10 @@ export const ALIBABA_TOKEN_PLAN_DISCOVERED_MODEL_LIMITS: Readonly<Record<string,
 		contextWindow: 1_000_000,
 		maxTokens: 384_000,
 	},
+	"deepseek-v4-pro-0813": {
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	},
 	"deepseek-v3.2": {
 		contextWindow: 131_072,
 		maxTokens: 65_536,
@@ -3136,6 +3320,12 @@ export function vercelAiGatewayModelManagerOptions(
 				): ModelSpec<"anthropic-messages"> => {
 					const pricing = entry.pricing as Record<string, unknown> | undefined;
 					const tags = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
+					const reportedMaxTokens = typeof entry.max_tokens === "number" ? entry.max_tokens : defaults.maxTokens;
+					const modelId = typeof entry.id === "string" ? entry.id : defaults.id;
+					const maxTokens =
+						modelId === "meta/muse-spark-1.2-contributor" && typeof reportedMaxTokens === "number"
+							? Math.min(reportedMaxTokens, 131_072)
+							: reportedMaxTokens;
 
 					return {
 						...defaults,
@@ -3150,7 +3340,7 @@ export function vercelAiGatewayModelManagerOptions(
 						},
 						contextWindow:
 							typeof entry.context_window === "number" ? entry.context_window : defaults.contextWindow,
-						maxTokens: typeof entry.max_tokens === "number" ? entry.max_tokens : defaults.maxTokens,
+						maxTokens,
 					};
 				},
 				fetch: config?.fetch,
@@ -4469,11 +4659,14 @@ export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	referenceResolver?: (modelId: string) => ModelSpec<TApi> | undefined;
+	resolveApi?: (entry: Record<string, unknown>, modelId: string) => TApi;
 }
 
 type LiteLLMRichModelEntry = Record<string, unknown>;
+type LiteLLMApiRoute = "openai" | "other" | "unknown";
 type LiteLLMRichEndpointModel<TApi extends Api> = {
 	model: ModelSpec<TApi>;
+	apiRoute: LiteLLMApiRoute;
 	supportsVision: unknown;
 	supportsReasoning: unknown;
 	hasContextWindow: boolean;
@@ -4554,14 +4747,15 @@ function toLiteLLMDisplayName(modelName: string | undefined, referenceName: stri
 	return referenceName ? stripLiteLLMResellerUsageSuffix(referenceName) : id;
 }
 
-function mapLiteLLMOpenAICompatibleModel<TApi extends Api>(
+function mapLiteLLMOpenAICompatibleModel(
 	entry: OpenAICompatibleModelRecord,
-	defaults: ModelSpec<TApi>,
-	reference: ModelSpec<TApi> | undefined,
-): ModelSpec<TApi> {
+	defaults: ModelSpec<Api>,
+	reference: ModelSpec<Api> | undefined,
+): ModelSpec<Api> {
 	const model = mapWithBundledReference(entry, defaults, reference);
 	return {
 		...model,
+		api: resolveLiteLLMApi(undefined, model.id),
 		name: stripLiteLLMResellerUsageSuffix(model.name),
 	};
 }
@@ -4646,6 +4840,55 @@ function getSupportedOpenAIParams(entry: LiteLLMRichModelEntry): string[] | unde
 		return undefined;
 	}
 	return value.flatMap(item => (typeof item === "string" ? [item] : []));
+}
+
+function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined {
+	if (!Array.isArray(entry.providers)) {
+		return undefined;
+	}
+	const providers = entry.providers.flatMap(provider => {
+		const normalized = toNonEmptyString(provider)?.toLowerCase();
+		return normalized ? [normalized] : [];
+	});
+	return providers.length > 0 ? providers : undefined;
+}
+
+function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: string): LiteLLMApiRoute {
+	if (entry) {
+		const providers = getLiteLLMProviders(entry);
+		if (providers) {
+			return providers.every(provider => provider === "openai") ? "openai" : "other";
+		}
+
+		const params = getLiteLLMParams(entry);
+		const configuredProvider = toNonEmptyString(params?.custom_llm_provider)?.toLowerCase();
+		if (configuredProvider) {
+			return configuredProvider === "openai" ? "openai" : "other";
+		}
+
+		const backendModel = toNonEmptyString(params?.model);
+		const backendSeparator = backendModel?.indexOf("/") ?? -1;
+		if (backendModel && backendSeparator > 0) {
+			return backendModel.slice(0, backendSeparator).toLowerCase() === "openai" ? "openai" : "other";
+		}
+
+		const baseModel = toNonEmptyString(getLiteLLMMetadataValue(entry, "base_model"));
+		const baseSeparator = baseModel?.indexOf("/") ?? -1;
+		if (baseModel && baseSeparator > 0) {
+			return baseModel.slice(0, baseSeparator).toLowerCase() === "openai" ? "openai" : "other";
+		}
+	}
+
+	const modelId = id.toLowerCase().startsWith("openai/") ? id.slice("openai/".length) : id;
+	return isLikelyOpenAIResponsesModelId(modelId) ? "openai" : "unknown";
+}
+
+export function resolveLiteLLMApi(
+	entry: Record<string, unknown> | undefined,
+	id: string,
+	fallbackApi: Api = "openai-completions",
+): Api {
+	return classifyLiteLLMApiRoute(entry, id) === "openai" ? "openai-responses" : fallbackApi;
 }
 
 function isLiteLLMUnusableSentinelPlaceholder(entry: LiteLLMRichModelEntry): boolean {
@@ -4740,7 +4983,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
-		api: options.api,
+		api: options.resolveApi?.(entry, id) ?? options.api,
 		provider: options.provider,
 		baseUrl: runtimeBaseUrl,
 		contextWindow,
@@ -4757,6 +5000,34 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		compat: compat as ModelSpec<TApi>["compat"],
 	};
+}
+
+function mergeLiteLLMRichEndpointModels<TApi extends Api>(
+	existing: LiteLLMRichEndpointModel<TApi>,
+	next: LiteLLMRichEndpointModel<TApi>,
+): LiteLLMRichEndpointModel<TApi> {
+	const apiRoute =
+		existing.apiRoute === "other" || next.apiRoute === "other"
+			? "other"
+			: existing.apiRoute === "openai" || next.apiRoute === "openai"
+				? "openai"
+				: "unknown";
+	const api = next.apiRoute === apiRoute ? next.model.api : existing.model.api;
+	const model: ModelSpec<TApi> = {
+		...existing.model,
+		api,
+		name: next.model.name === next.model.id ? existing.model.name : next.model.name,
+		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
+		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
+		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
+		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
+		cost: next.hasCost ? next.model.cost : existing.model.cost,
+		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
+	};
+	if (next.hasToolMetadata) {
+		model.supportsTools = next.model.supportsTools;
+	}
+	return { ...next, apiRoute, model };
 }
 
 async function fetchLiteLLMRichEndpoint<TApi extends Api>(
@@ -4798,7 +5069,6 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 		return null;
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
-	let incompleteVisionMetadata = false;
 	for (const entry of entries) {
 		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
 		if (model) {
@@ -4806,11 +5076,9 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 			const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
 			const supportedOpenAIParams = getSupportedOpenAIParams(entry);
-			if (supportsVision !== true && supportsVision !== false) {
-				incompleteVisionMetadata = true;
-			}
-			deduped.set(model.id, {
+			const next: LiteLLMRichEndpointModel<TApi> = {
 				model,
+				apiRoute: classifyLiteLLMApiRoute(entry, model.id),
 				supportsVision,
 				supportsReasoning,
 				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
@@ -4821,19 +5089,22 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
-			});
+			};
+			const existing = deduped.get(model.id);
+			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
 		}
 	}
 	if (deduped.size === 0) {
 		return null;
 	}
+	const models = Array.from(deduped.values()).sort((left, right) => left.model.id.localeCompare(right.model.id));
 	return {
-		models: Array.from(deduped.values()).sort((left, right) => left.model.id.localeCompare(right.model.id)),
-		incompleteVisionMetadata,
+		models,
+		incompleteVisionMetadata: models.some(entry => entry.supportsVision !== true && entry.supportsVision !== false),
 	};
 }
 
-export async function fetchLiteLLMRichModels<TApi extends Api>(
+async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 	options: FetchLiteLLMRichModelsOptions<TApi>,
 ): Promise<ModelSpec<TApi>[] | null> {
 	const managementBaseUrl = normalizeLiteLLMManagementBaseUrl(options.baseUrl);
@@ -4873,32 +5144,19 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 					}
 					continue;
 				}
-				const model: ModelSpec<TApi> = {
-					...existing.model,
-					name: next.model.name === next.model.id ? existing.model.name : next.model.name,
-					contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
-					maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
-					input:
-						next.supportsVision === true || next.supportsVision === false
-							? next.model.input
-							: existing.model.input,
-					reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
-					cost: next.hasCost ? next.model.cost : existing.model.cost,
-					compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
-				};
-				if (next.hasToolMetadata) {
-					model.supportsTools = next.model.supportsTools;
-				}
-				deduped.set(next.model.id, { ...next, model });
+				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
 			}
-			let hasIncompleteVisionMetadata = false;
+			let needsMoreMetadata = false;
 			for (const entry of deduped.values()) {
-				if (entry.supportsVision !== true && entry.supportsVision !== false) {
-					hasIncompleteVisionMetadata = true;
+				if (
+					(entry.supportsVision !== true && entry.supportsVision !== false) ||
+					(options.resolveApi !== undefined && entry.apiRoute === "unknown")
+				) {
+					needsMoreMetadata = true;
 					break;
 				}
 			}
-			if (!hasIncompleteVisionMetadata) {
+			if (!needsMoreMetadata) {
 				break;
 			}
 		}
@@ -4918,40 +5176,45 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 	return options.timeoutMs !== undefined ? withCatalogDiscoveryTimeout(options.timeoutMs, fetchModels) : fetchModels();
 }
 
-export function litellmModelManagerOptions(
-	config?: LiteLLMModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
+export async function fetchLiteLLMRichModels<TApi extends Api>(
+	options: FetchLiteLLMRichModelsOptions<TApi>,
+): Promise<ModelSpec<TApi>[] | null> {
+	return fetchLiteLLMRichModelsInternal(options);
+}
+
+export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v5 invalidates rows cached before rich metadata pricing was mapped.
+		// rich-v6 invalidates rows cached before OpenAI models moved to Responses.
 		// Earlier versions added bundled reference fallback, continued discovery
 		// past incomplete `/model_group/info`, stripped reseller usage suffixes,
-		// and filtered placeholder-only `all-team-models` rows. Bump the version
-		// whenever the mappers below change, or warm authoritative caches keep
-		// serving pre-change rows for the full TTL.
+		// filtered placeholder-only `all-team-models` rows, and mapped rich pricing.
+		// Bump the version whenever the mappers below change, or warm authoritative
+		// caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
 		// management metadata, then enrich ids against models.dev with the bundled
 		// catalog as a fallback before using /v1/models.
 		fetchDynamicModels: async () => {
-			const modelsDevReferences = await loadModelsDevReferences<"openai-completions">(config?.fetch);
+			const modelsDevReferences = await loadModelsDevReferences<Api>(config?.fetch);
 			const resolveReference = createReferenceResolver(modelsDevReferences);
-			const richModels = await fetchLiteLLMRichModels({
+			const richModels = await fetchLiteLLMRichModels<Api>({
 				api: "openai-completions",
 				provider: "litellm",
 				baseUrl,
 				apiKey,
 				fetch: config?.fetch,
 				referenceResolver: resolveReference,
+				resolveApi: resolveLiteLLMApi,
 				timeoutMs: 10_000,
 			});
 			if (richModels && richModels.length > 0) {
 				return richModels;
 			}
-			return fetchOpenAICompatibleModels({
+			return fetchOpenAICompatibleModels<Api>({
 				api: "openai-completions",
 				provider: "litellm",
 				baseUrl,
@@ -4994,6 +5257,11 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					return {
 						...model,
 						contextWindow: toPositiveNumber(entry.max_model_len, model.contextWindow),
+						// vLLM's /v1/models reports no reasoning capability. Qwen 3.8+
+						// open weights always think (the template cannot disable it), so
+						// light up the effort dial; buildModel derives the template
+						// ladder from the id + local-backend compat.
+						reasoning: model.reasoning || isQwen38PlusTemplateEffortModelId(model.id),
 					};
 				},
 				fetch: config?.fetch,
@@ -5071,8 +5339,18 @@ export interface GithubCopilotModelManagerConfig {
 
 const COPILOT_ANTHROPIC_MODEL_PATTERN = /^claude-(haiku|sonnet|opus|fable|mythos)-\d/;
 const isCopilotResponsesModelId = (modelId: string): boolean =>
-	modelId === "grok-4.5" || modelId.startsWith("gpt-5") || modelId.startsWith("oswe") || modelId.startsWith("mai-");
-const COPILOT_CACHE_INVALIDATED_MODEL_IDS = ["grok-4.5", "grok-4.5-1m", "mai-code-1-flash-picker"];
+	modelId === "grok-4.5" ||
+	modelId === "grok-4.6" ||
+	modelId.startsWith("gpt-5") ||
+	modelId.startsWith("oswe") ||
+	modelId.startsWith("mai-");
+const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
+	"grok-4.5",
+	"grok-4.5-1m",
+	"grok-4.6",
+	"grok-4.6-1m",
+	"mai-code-1-flash-picker",
+];
 
 function inferCopilotApi(modelId: string): Api {
 	if (COPILOT_ANTHROPIC_MODEL_PATTERN.test(modelId)) {
@@ -5677,42 +5955,17 @@ function createOpenCodeApiResolution(
 	};
 }
 
-// OpenCode Zen: models.dev declares minimax-m3-free (and forward-compat
-// minimax-m3) with `provider.npm = "@ai-sdk/anthropic"`, but the Zen gateway
-// only serves them at https://opencode.ai/zen/v1/chat/completions (verified
-// against the live /v1/models response — minimax-m3-free is listed there, and
-// the gateway has no /v1/messages route for it). Without this override the
-// resolver POSTs anthropic-shaped requests to /v1/messages and the UI surfaces
-// raw <invoke>/<|minimax|>/<tool_call> markup (#1617).
-const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen", {
-	"minimax-m3": "openai-completions",
-	"minimax-m3-free": "openai-completions",
-});
-// OpenCode Go: models.dev declares minimax-m2.7 / qwen3.5-plus / qwen3.6-plus
-// (and now also minimax-m3) with `provider.npm = "@ai-sdk/anthropic"`, but
-// the OpenCode Go gateway only serves them at
-// `https://opencode.ai/zen/go/v1/chat/completions` (verified against
-// https://opencode.ai/zen/go/v1/models and the upstream endpoint table at
-// https://opencode.ai/docs/go/#endpoints — minimax-m2.5 works the same way
-// and lacks an `npm` field on models.dev so it already falls through to the
-// openai-completions default). Without this override the resolver would POST
-// anthropic-style requests to /v1/messages and the gateway would return its
-// `Page Not Found` HTML (issue #887 for the qwen/m2.7 entries; minimax-m3
-// and minimax-m3-free added under #1617 for the same root cause).
-//
-// deepseek-v4-flash is the inverse case: it falls through to
-// openai-completions by default, but the Go gateway's
-// /zen/go/v1/chat/completions route does not work for this model while
-// /zen/go/v1/responses does (user-verified against the live gateway,
-// 2026-08-08; Flash only — deepseek-v4-pro serves fine on chat completions).
-const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", {
-	"deepseek-v4-flash": "openai-responses",
-	"minimax-m2.7": "openai-completions",
-	"minimax-m3": "openai-completions",
-	"minimax-m3-free": "openai-completions",
-	"qwen3.5-plus": "openai-completions",
-	"qwen3.6-plus": "openai-completions",
-});
+// Resolver rules for the models.dev descriptor path; the per-id pins live in
+// OPENCODE_ZEN_API_ID_OVERRIDES / OPENCODE_GO_API_ID_OVERRIDES (section 8),
+// which also drive the live-discovery mapper.
+const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution(
+	"https://opencode.ai/zen",
+	OPENCODE_ZEN_API_ID_OVERRIDES,
+);
+const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution(
+	"https://opencode.ai/zen/go",
+	OPENCODE_GO_API_ID_OVERRIDES,
+);
 
 const COPILOT_BASE_URL = "https://api.githubcopilot.com";
 

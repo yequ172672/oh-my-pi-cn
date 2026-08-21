@@ -4,8 +4,59 @@ on:
    push:
       branches: [main]
       tags: ["omp-cn-v*"]
+      paths:
+         - "packages/**"
+         - "crates/**"
+         - "scripts/**"
+         - "bazel/**"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "BUILD.bazel"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "deny.toml"
+         - "about.toml"
+         - "LICENSE"
+         - "THIRD-PARTY-NOTICES.txt"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         - "bun.lock"
+         - "bunfig.toml"
+         - "package.json"
+         - "patches/**"
+         - ".github/**"
    pull_request:
       branches: [main]
+      paths:
+         - "packages/**"
+         - "crates/**"
+         - "scripts/**"
+         - "bazel/**"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "BUILD.bazel"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "deny.toml"
+         - "about.toml"
+         - "LICENSE"
+         - "THIRD-PARTY-NOTICES.txt"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         # A root dependency change (lockfile/catalog/patches) affects every
+         # job; without these a lockfile-only push shipped untested — and a
+         # release retagged onto such a commit never triggered its run.
+         - "bun.lock"
+         - "bunfig.toml"
+         - "package.json"
+         - "patches/**"
+         - ".github/**"
    workflow_dispatch:
       inputs:
          release_tag:
@@ -87,46 +138,66 @@ jobs:
               } >> "$GITHUB_OUTPUT"
 
    native_addons:
-      name: Fetch exact upstream native addons
+      name: Prepare exact native addons
       needs: [resolve]
       runs-on: ubuntu-22.04
-      timeout-minutes: 10
+      timeout-minutes: 45
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
            with:
               ref: ${{ needs.resolve.outputs.sha }}
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/setup-system-deps
-         - name: Download and validate native package
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+           with:
+              scope: fork-native
+         - name: Download published addons or build the validation SHA
            shell: bash
            env:
               IS_RELEASE: ${{ needs.resolve.outputs.is-release }}
            run: |
               set -euo pipefail
               native_version="$(bun -e 'const manifest = await Bun.file("packages/natives/package.json").json(); process.stdout.write(manifest.version)')"
+              all_published=true
+              for leaf in pi-natives pi-natives-linux-x64 pi-natives-linux-arm64 pi-natives-darwin-x64 pi-natives-darwin-arm64 pi-natives-win32-x64; do
+                published="$(npm view "@oh-my-pi/${leaf}@${native_version}" version 2>/dev/null || true)"
+                if [[ "$published" != "$native_version" ]]; then
+                  all_published=false
+                  echo "Exact native dependency is not published yet: @oh-my-pi/${leaf}@${native_version}"
+                fi
+              done
+
               if [[ "$IS_RELEASE" == "true" ]]; then
                 metadata_native_version="$(bun -e 'const metadata = await Bun.file("packages/coding-agent/fork-release.json").json(); process.stdout.write(metadata.nativeVersion)')"
                 [[ "$native_version" == "$metadata_native_version" ]] || {
                   echo "Native manifest $native_version does not match fork metadata $metadata_native_version" >&2
                   exit 1
                 }
-              fi
-              for leaf in pi-natives pi-natives-linux-x64 pi-natives-linux-arm64 pi-natives-darwin-x64 pi-natives-darwin-arm64 pi-natives-win32-x64; do
-                published="$(npm view "@oh-my-pi/${leaf}@${native_version}" version)"
-                [[ "$published" == "$native_version" ]] || {
-                  echo "Missing exact native dependency @oh-my-pi/${leaf}@${native_version}" >&2
+                [[ "$all_published" == true ]] || {
+                  echo "A fork release requires every exact native package to be published" >&2
                   exit 1
                 }
-              done
-              package="@oh-my-pi/pi-natives-linux-x64@${native_version}"
-              tarball="$(npm view "$package" dist.tarball)"
-              test -n "$tarball"
+              fi
+
               mkdir -p "$RUNNER_TEMP/omp-native" \
                 bazel-bin/natives-linux-x64-baseline \
                 bazel-bin/natives-linux-x64-modern
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP/omp-native"
-              cp "$RUNNER_TEMP/omp-native/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/omp-native/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
+
+              if [[ "$all_published" == true ]]; then
+                package="@oh-my-pi/pi-natives-linux-x64@${native_version}"
+                tarball="$(npm view "$package" dist.tarball)"
+                test -n "$tarball"
+                curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP/omp-native"
+                addon_dir="$RUNNER_TEMP/omp-native/package"
+              else
+                addon_dir="$RUNNER_TEMP/omp-native/source"
+                bun scripts/bazel-natives.ts linux-x64-baseline linux-x64-modern \
+                  --dest "$addon_dir" -- --bazelrc="${{ steps.cache.outputs.rc }}"
+              fi
+
+              cp "$addon_dir/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
+              cp "$addon_dir/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
               node -e 'for (const f of process.argv.slice(1)) require(f)' \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
@@ -147,6 +218,11 @@ jobs:
            with:
               ref: ${{ needs.resolve.outputs.sha }}
          - uses: ./.github/actions/bun-install
+         - name: Verify Rust license compliance (cargo-deny 0.20.2)
+           run: |
+              cargo install --locked --version 0.20.2 cargo-deny
+              cargo fetch --locked
+              cargo deny --locked --offline check licenses sources
          - id: cache
            uses: ./.github/actions/bazel-cache
            with:
@@ -356,6 +432,15 @@ jobs:
       needs: [resolve, validate, rust_validate, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, install_methods]
       runs-on: ubuntu-22.04
       steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ needs.resolve.outputs.sha }}
+         - uses: ./.github/actions/bun-install
+         # Generated-config drift gate: bazel/clippy.bazelrc is maintained by
+         # scripts/release.ts (like the lockfiles); a stale file only blocks
+         # publishing, never ordinary CI.
+         - name: Check generated clippy config
+           run: bun scripts/gen-clippy-bazelrc.ts --check
          - run: echo "fork release validation green"
 
    release_package:
@@ -478,7 +563,9 @@ jobs:
            run: |
               set -euo pipefail
               test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
-              bun run ci:release:checksums release-assets/SHA256SUMS.txt release-assets/omp-*
+              cp LICENSE THIRD-PARTY-NOTICES.txt release-assets/
+              bun run ci:release:checksums release-assets/SHA256SUMS.txt \
+                release-assets/omp-* release-assets/LICENSE release-assets/THIRD-PARTY-NOTICES.txt
               bun scripts/fork-release-notes.ts release-notes.md
          - name: Create or refresh draft release
            id: release
@@ -489,7 +576,9 @@ jobs:
            run: |
               set -euo pipefail
               cat > "$RUNNER_TEMP/expected-assets.txt" <<EOF
+              LICENSE
               SHA256SUMS.txt
+              THIRD-PARTY-NOTICES.txt
               omp-cn-${RELEASE_VERSION}.tgz
               omp-windows-x64.exe
               EOF

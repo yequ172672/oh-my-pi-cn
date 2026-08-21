@@ -3,9 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { CURSOR_MARKER, TUI } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, Editor, type EditorTheme, TUI } from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -161,6 +160,38 @@ describe("Editor component", () => {
 			editor.setText("alfa beta gamma");
 			editor.handleInput("\x1b[127;5u"); // kitty CSI-u ctrl+backspace
 			expect(editor.getText()).toBe("alfa beta ");
+		});
+	});
+
+	describe("Submit/newline keybindings", () => {
+		it("submits on Ctrl+Enter when tui.input.submit is remapped to it (#8906)", () => {
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.input.submit": "ctrl+enter",
+					"tui.input.newLine": "enter",
+				}),
+			);
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("hello");
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\x1b[13;5u"); // kitty CSI-u Ctrl+Enter
+			expect(submitted).toBe("hello");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("still inserts a newline on Ctrl+Enter under the default bindings", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("hello");
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\x1b[13;5u"); // kitty CSI-u Ctrl+Enter
+			expect(submitted).toBeUndefined();
+			expect(editor.getText()).toBe("hello\n");
 		});
 	});
 
@@ -1025,7 +1056,7 @@ describe("Editor component", () => {
 				await terminal.waitForRender();
 				for (const char of "ast") editor.handleInput(char);
 				tui.requestRender();
-				await terminal.waitForRender();
+				await terminal.waitForRender(() => terminal.getViewport()[1]?.includes("ast") === true);
 
 				const beforePreedit = terminal.getViewport().map(row => row.trimEnd());
 				expect(beforePreedit.slice(0, 3)).toEqual(["+------------------+", "|  ast", "+------------------+"]);
@@ -2868,6 +2899,135 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("line one\nline two");
 			editor.setVolatileText("single line");
 			expect(editor.getText()).toBe("single line");
+		});
+	});
+
+	describe("composer border styles", () => {
+		const unicodeTheme: EditorTheme = {
+			...defaultEditorTheme,
+			borderColor: (t: string) => t,
+			symbols: {
+				cursor: "❯",
+				inputCursor: "│",
+				boxRound: {
+					topLeft: "╭",
+					topRight: "╮",
+					bottomLeft: "╰",
+					bottomRight: "╯",
+					horizontal: "─",
+					vertical: "│",
+				},
+				boxSharp: {
+					topLeft: "┌",
+					topRight: "┐",
+					bottomLeft: "└",
+					bottomRight: "┘",
+					horizontal: "─",
+					vertical: "│",
+					teeDown: "┬",
+					teeUp: "┴",
+					teeLeft: "├",
+					teeRight: "┤",
+					cross: "┼",
+				},
+				table: {
+					topLeft: "┌",
+					topRight: "┐",
+					bottomLeft: "└",
+					bottomRight: "┘",
+					horizontal: "─",
+					vertical: "│",
+					teeDown: "┬",
+					teeUp: "┴",
+					teeLeft: "├",
+					teeRight: "┤",
+					cross: "┼",
+				},
+				quoteBorder: "│",
+				hrChar: "─",
+				spinnerFrames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+			},
+		};
+
+		it("renders claude style with top and bottom horizontal rules and prompt gutter", () => {
+			const editor = new Editor(unicodeTheme);
+			editor.setBorderStyle("claude");
+			editor.setText("hello");
+			const lines = editor.render(20);
+			expect(lines.length).toBe(3); // top rule, content, bottom rule
+			expect(lines[0]).toBe("─".repeat(20));
+			expect(lines[1]).toContain("❯ hello");
+			expect(lines[2]).toBe("─".repeat(20));
+		});
+
+		it("renders pi style with full-width rules, padded content, and no prompt gutter", () => {
+			const editor = new Editor(unicodeTheme);
+			editor.setBorderStyle("pi");
+			editor.setText("hello");
+			const lines = editor.render(20);
+			expect(lines.length).toBe(3); // top rule, content, bottom rule
+			expect(lines[0]).toBe("─".repeat(20));
+			expect(lines[1]).toStartWith(" hello");
+			expect(lines[1]).not.toContain(">");
+			expect(lines[2]).toBe("─".repeat(20));
+		});
+
+		it("renders borderless style without box borders", () => {
+			const editor = new Editor(unicodeTheme);
+			editor.setBorderStyle("borderless");
+			editor.setText("hello");
+			const lines = editor.render(20);
+			expect(lines.length).toBe(1); // content only
+			expect(lines[0]).toContain("❯ hello");
+		});
+
+		it("renders default box style with compact bottom border", () => {
+			const editor = new Editor(unicodeTheme);
+			editor.setText("hello");
+			const lines = editor.render(20);
+			expect(lines.length).toBe(2); // top border, bottom border with content
+			expect(lines[0]).toContain("╭");
+			expect(lines[1]).toContain("╰─ hello");
+		});
+
+		it("renders rule style as a top-rule dock without closing chrome", () => {
+			const editor = new Editor(unicodeTheme);
+			editor.setBorderStyle("rule");
+			editor.setText("hello");
+			const lines = editor.render(20);
+			expect(lines).toHaveLength(2);
+			expect(lines[0]).toBe("─".repeat(20));
+			expect(lines[1]).toStartWith("❯ hello");
+		});
+
+		it("renders field style as one filled row with accent caps", () => {
+			const editor = new Editor({
+				...unicodeTheme,
+				accentColor: text => `\x1b[35m${text}\x1b[39m`,
+				surfaceColor: text => `\x1b[44m${text}\x1b[49m`,
+			});
+			editor.setBorderStyle("field");
+			editor.setText("hello");
+			const [line] = editor.render(20);
+			expect(stripVTControlCharacters(line)).toStartWith("▐ hello");
+			expect(stripVTControlCharacters(line)).toEndWith("▌");
+			expect(visibleWidth(line)).toBe(20);
+			expect(line).toContain("\x1b[44m");
+		});
+
+		it("renders rail style as a full-width surface with one accent edge", () => {
+			const editor = new Editor({
+				...unicodeTheme,
+				accentColor: text => `\x1b[35m${text}\x1b[39m`,
+				surfaceColor: text => `\x1b[44m${text}\x1b[49m`,
+			});
+			editor.setBorderStyle("rail");
+			editor.setText("hello");
+			const [line] = editor.render(20);
+			expect(stripVTControlCharacters(line)).toStartWith("▎ hello");
+			expect(stripVTControlCharacters(line)).not.toContain("▌");
+			expect(visibleWidth(line)).toBe(20);
+			expect(line).toContain("\x1b[44m");
 		});
 	});
 });

@@ -72,13 +72,34 @@ export const KNOWN_HOSTS = {
 
 export type KnownHost = keyof typeof KNOWN_HOSTS;
 
+// Host checks fan out across every compatibility field for a model. Bound the
+// cache because custom providers may contribute arbitrary endpoints at runtime.
+const MAX_URL_HOST_MATCHES = 512;
+const urlHostMatches = new Map<string, Map<KnownHost, boolean>>();
+
+function getUrlHostMatches(baseUrl: string): Map<KnownHost, boolean> {
+	let matches = urlHostMatches.get(baseUrl);
+	if (matches !== undefined) return matches;
+	if (urlHostMatches.size === MAX_URL_HOST_MATCHES) urlHostMatches.clear();
+	matches = new Map<KnownHost, boolean>();
+	urlHostMatches.set(baseUrl, matches);
+	return matches;
+}
+
 /** URL-only host check (for call sites that have no provider id, e.g. raw env config). */
 export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): boolean {
 	if (!baseUrl) return false;
+	const matches = getUrlHostMatches(baseUrl);
+	const cached = matches.get(host);
+	if (cached !== undefined) return cached;
 	const spec: HostClassSpec = KNOWN_HOSTS[host];
 	for (const marker of spec.urlMarkers) {
-		if (includesAsciiCaseInsensitive(baseUrl, marker)) return true;
+		if (includesAsciiCaseInsensitive(baseUrl, marker)) {
+			matches.set(host, true);
+			return true;
+		}
 	}
+	matches.set(host, false);
 	return false;
 }
 

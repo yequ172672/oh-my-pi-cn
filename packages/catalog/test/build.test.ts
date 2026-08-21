@@ -11,7 +11,7 @@ import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cach
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -56,6 +56,16 @@ describe("buildModel", () => {
 		expect(typeof model.compat.isOpenRouterHost).toBe("boolean");
 		expect(model.compat.isOpenRouterHost).toBe(false);
 		expect(model.compatConfig).toBeUndefined();
+	});
+
+	it("built models survive a JSON roundtrip, so generator-materialized rows need no rebuild", () => {
+		// models.ts consumes models.json rows verbatim as complete Models; this
+		// holds only if buildModel output is pure JSON (no functions, no
+		// undefined-valued fields that JSON would drop).
+		const generated = [buildModel(completionsSpec({ reasoning: true })), buildModel(openrouterSpec())];
+		for (const model of generated) {
+			expect(JSON.parse(JSON.stringify(model)) as Model<Api>).toEqual(model);
+		}
 	});
 
 	it("lets sparse overrides win over detection and keeps the verbatim config", () => {
@@ -292,6 +302,25 @@ describe("xAI Responses reasoning-effort suppression", () => {
 		expect(buildModel(grokResponsesSpec("grok-code-fast-1", "xai")).thinking).toBeUndefined();
 	});
 
+	it("exposes the grok-4.6 low..xhigh ladder and rejects max", () => {
+		const model = buildModel(grokResponsesSpec("grok-4.6"));
+		expect(model.compat.supportsReasoningEffort).toBe(true);
+		expect(model.compat.omitReasoningEffort).toBe(false);
+		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(model.thinking?.efforts).not.toContain(Effort.Max);
+	});
+
+	it("lets the grok-4.6 allowlist beat a stale cached omitReasoningEffort flag", () => {
+		const model = buildModel({
+			...grokResponsesSpec("grok-4.6"),
+			compat: { omitReasoningEffort: true },
+		});
+		expect(model.compat.supportsReasoningEffort).toBe(true);
+		expect(model.compat.omitReasoningEffort).toBe(false);
+		expect(model.thinking?.efforts).toContain(Effort.XHigh);
+		expect(model.thinking?.efforts).not.toContain(Effort.Max);
+	});
+
 	it("lets an explicit compat.supportsReasoningEffort override the allowlist default", () => {
 		const compat = buildOpenAIResponsesCompat({
 			...grokResponsesSpec("grok-build"),
@@ -414,6 +443,32 @@ describe("openai-completions wire-quirk compat detection", () => {
 					reasoning: false,
 				}),
 			).supportsForcedToolChoice,
+		).toBe(true);
+	});
+	it("downgrades forced tool choice for OpenCode gateways on Responses API", () => {
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2-contributor",
+				provider: "opencode-go",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2",
+				provider: "opencode-zen",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "gpt-5",
+				provider: "openai",
+				name: "GPT-5",
+				baseUrl: "https://api.openai.com/v1",
+			}).supportsForcedToolChoice,
 		).toBe(true);
 	});
 

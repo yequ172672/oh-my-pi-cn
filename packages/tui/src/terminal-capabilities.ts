@@ -223,6 +223,16 @@ function getForcedImageProtocol(): ImageProtocol | null | undefined {
 	return null;
 }
 
+/**
+ * Whether `PI_FORCE_IMAGE_PROTOCOL` pins the image protocol, including its
+ * `off`/`none` kill switch. A runtime capability probe must not override an
+ * explicit user choice: a forced protocol is already applied to {@link TERMINAL},
+ * and a forced "off" leaves `imageProtocol` null on purpose.
+ */
+export function isImageProtocolForced(): boolean {
+	return getForcedImageProtocol() !== undefined;
+}
+
 function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: number } | null {
 	if (!versionRaw) return null;
 	const match = /^(\d+)\.(\d+)/u.exec(versionRaw.trim());

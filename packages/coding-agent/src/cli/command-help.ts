@@ -1,4 +1,5 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
+import { t } from "../i18n";
 
 export const acpHelp = {
 	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
@@ -65,6 +66,10 @@ export const joinHelp = { description: "Join a shared collab session (same as /j
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
+
+export const psHelp = {
+	description: t("ps.description"),
+} satisfies CommandMetadata;
 
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",

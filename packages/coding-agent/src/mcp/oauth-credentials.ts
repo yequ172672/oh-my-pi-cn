@@ -1,3 +1,4 @@
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import type { AuthStorage } from "../session/auth-storage";
@@ -6,6 +7,7 @@ import {
 	type MCPStoredOAuthCredential,
 	mcpOAuthCredentialId,
 	mcpOAuthCredentialProfile,
+	refreshMCPOAuthToken,
 } from "./oauth-flow";
 import type { MCPAuthConfig, MCPServerConfig } from "./types";
 
@@ -78,6 +80,42 @@ export function selectMcpOAuthRefreshMaterial(
 	auth: MCPAuthConfig | undefined,
 ): MCPOAuthRefreshMaterial {
 	return credential.tokenUrl ? credential : auth;
+}
+
+/**
+ * Refresh a stored MCP OAuth credential via the standard `refresh_token` grant.
+ *
+ * Refresh material is taken from the credential itself (self-contained modern
+ * credentials embed `tokenUrl`/`clientId`/`clientSecret`/`resource`) or, for
+ * legacy credentials that carry none, the server's `auth` block. Shared by the
+ * local MCP manager and the `omp auth-broker serve` refresh path so a broker
+ * with no access to the MCP config can still refresh `mcp_oauth:*` credentials
+ * from the vault.
+ *
+ * `serverUrl` supplies the RFC 8707 fallback resource indicator when neither
+ * the credential nor the auth block advertised one; the manager passes the
+ * configured server URL, the broker recovers it from the credential id via
+ * {@link mcpOAuthServerUrlFromCredentialId}.
+ *
+ * @throws when no usable refresh token or token endpoint is available.
+ */
+export function refreshManagedMcpOAuthCredential(
+	credential: MCPStoredOAuthCredential,
+	opts: { serverUrl?: string; auth?: MCPAuthConfig; signal?: AbortSignal } = {},
+): Promise<OAuthCredentials> {
+	const material = selectMcpOAuthRefreshMaterial(credential, opts.auth);
+	const tokenUrl = material?.tokenUrl;
+	if (!credential.refresh || !tokenUrl) {
+		throw new Error("MCP OAuth credential is missing refresh material");
+	}
+	const authorizationUrl = material && "authorizationUrl" in material ? material.authorizationUrl : undefined;
+	const resourceIsFallback = !material?.resource && Boolean(opts.serverUrl);
+	const resource = material?.resource ?? (resourceIsFallback ? opts.serverUrl : undefined);
+	return refreshMCPOAuthToken(tokenUrl, credential.refresh, material?.clientId, material?.clientSecret, resource, {
+		authorizationUrl,
+		stripSameOriginResource: resourceIsFallback,
+		signal: opts.signal,
+	});
 }
 
 export async function removeManagedMcpOAuthCredential(

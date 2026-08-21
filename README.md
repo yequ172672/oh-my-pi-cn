@@ -735,10 +735,13 @@ bun dev -- --version
 
 ## 许可证
 
-本项目及本分支均遵循 MIT 协议，详见 [LICENSE](LICENSE)。LICENSE 文件中的上游版权声明保持不变。
+OMP 及本中文分支均遵循 [MIT 许可证](LICENSE)。
 
-© 2025 Mario Zechner
-© 2025-2026 Can Bölük
+第三方及 vendored 代码（包括 `crates/vendor/brush-core`，以及 `crates/pi-builtins/LICENSE` 标明的第三方部分）仍遵循各自的上游许可证。署名和附加条款请参阅 [`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt) 及各组件目录中的声明。
+
+© 2025 Mario Zechner<br>
+© 2025-2026 Can Bölük<br>
+© 2026 Stencil Labs, Inc.
 © 2026 yequ172672
 
 _为始终保持打开的终端而作_

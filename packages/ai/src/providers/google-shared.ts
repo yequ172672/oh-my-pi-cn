@@ -6,6 +6,7 @@ import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
+import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -617,11 +618,23 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
 	let currentBlock: TextContent | ThinkingContent | null = null;
+	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
+	// Gemini thought summaries emit as a between-summary delimiter (#8719). One
+	// stripper per thinking block; created lazily on first thinking delta.
+	let thinkingStripper: ThinkingFenceStripper | null = null;
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
 
 	const flushCurrent = () => {
 		if (!currentBlock) return;
+		if (currentBlock.type === "thinking" && thinkingStripper) {
+			const tail = thinkingStripper.flush();
+			if (tail) {
+				currentBlock.thinking += tail;
+				stream.push({ type: "thinking_delta", contentIndex: blockIndex(), delta: tail, partial: output });
+			}
+		}
+		thinkingStripper = null;
 		pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
 	};
 
@@ -658,17 +671,21 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 						currentBlock = startTextOrThinkingBlock(isThinking, output, stream);
 					}
 					if (currentBlock.type === "thinking") {
-						currentBlock.thinking += part.text;
+						thinkingStripper ??= new ThinkingFenceStripper();
+						const cleaned = thinkingStripper.push(part.text);
+						currentBlock.thinking += cleaned;
 						currentBlock.thinkingSignature = retainThoughtSignature(
 							currentBlock.thinkingSignature,
 							part.thoughtSignature,
 						);
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: blockIndex(),
-							delta: part.text,
-							partial: output,
-						});
+						if (cleaned) {
+							stream.push({
+								type: "thinking_delta",
+								contentIndex: blockIndex(),
+								delta: cleaned,
+								partial: output,
+							});
+						}
 					} else {
 						currentBlock.text += part.text;
 						if (retainTextSignature) {

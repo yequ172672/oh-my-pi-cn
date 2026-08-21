@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type Component, CURSOR_MARKER, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class LineComponent implements Component {
@@ -166,6 +167,8 @@ async function settleResize(term: VirtualTerminal): Promise<void> {
 	await Bun.sleep(160);
 	await flushRender(term);
 }
+
+withoutTerminalMultiplexer();
 
 describe("TUI overlays", () => {
 	let savedTerminalEnv: Record<string, string | undefined> = {};

@@ -43,3 +43,5 @@ Acyclic waves via `agent(…, handle=true)` + `pipeline`/`parallel`:
 <critical>
 Prior top-level names survive into the next cell — reuse; NEVER re-import/re-declare. Re-read only if file changed since last read.
 </critical>
+
+{{#if autoBackgroundEnabled}}Long-running cells may auto-background and deliver later; the kernel stays busy until the cell finishes. Need inline? Raise `timeout`.{{/if}}

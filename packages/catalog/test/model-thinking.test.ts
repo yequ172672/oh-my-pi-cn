@@ -360,6 +360,28 @@ describe("model thinking derivation", () => {
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
+	it("maps minimal to LOW when a collapsed family aliases it onto the low wire id", () => {
+		const model = createModel({
+			id: "gemini-3.7-flash",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+				effortRouting: {
+					[Effort.Minimal]: "gemini-3.7-flash-low",
+					[Effort.Low]: "gemini-3.7-flash-low",
+					[Effort.Medium]: "gemini-3.7-flash-medium",
+					[Effort.High]: "gemini-3.7-flash-high",
+				},
+			},
+		});
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Low, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal)).toBe("MINIMAL");
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({
@@ -982,5 +1004,89 @@ describe("model thinking runtime helpers", () => {
 			mode: "effort",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
+	});
+});
+
+describe("Qwen 3.8 local template effort ladder", () => {
+	it("derives the low/medium/xhigh ladder with mandatory effort on local llama.cpp-style backends", () => {
+		const llamaCpp = createModel({
+			id: "qwen3.8-27b",
+			api: "openai-completions",
+			provider: "llama.cpp",
+			baseUrl: "http://127.0.0.1:8080/v1",
+		});
+		// Official 3.8 template: reasoning_effort accepts exactly low/medium/xhigh
+		// and raises on `enable_thinking: false` — off must clamp, never disable.
+		expect(llamaCpp.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			requiresEffort: true,
+		});
+		expect(llamaCpp.compat.qwenTemplateReasoningEffort).toBe(true);
+		// Unsupported tiers clamp onto real wire tiers: high floors to medium
+		// (xhigh is a deliberate opt-in), minimal floors to low.
+		expect(clampThinkingLevelForModel(llamaCpp, Effort.High)).toBe(Effort.Medium);
+		expect(clampThinkingLevelForModel(llamaCpp, Effort.Minimal)).toBe(Effort.Low);
+		expect(minimumSupportedEffort(llamaCpp)).toBe(Effort.Low);
+	});
+
+	it("normalizes a stale cached generic ladder to the template ladder", () => {
+		const cached = createModel({
+			id: "qwen3.8-27b",
+			api: "openai-completions",
+			provider: "vllm",
+			baseUrl: "http://127.0.0.1:8000/v1",
+			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+		});
+		expect(cached.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			requiresEffort: true,
+		});
+	});
+
+	it("routes vLLM Qwen through the chat_template_kwargs dialect", () => {
+		// vLLM ignores top-level `enable_thinking`; only chat_template_kwargs
+		// reach the template renderer.
+		const vllm = createModel({
+			id: "qwen3.8-27b",
+			api: "openai-completions",
+			provider: "vllm",
+			baseUrl: "http://127.0.0.1:8000/v1",
+		});
+		expect(vllm.compat.thinkingFormat).toBe("qwen-chat-template");
+		expect(vllm.compat.reasoningDisableMode).toBe("qwen-template-false");
+		expect(vllm.compat.qwenTemplateReasoningEffort).toBe(true);
+	});
+
+	it("keeps hosted, pre-3.8, and local-Ollama Qwen off the template ladder", () => {
+		const hosted = createModel({
+			id: "qwen3.8-27b",
+			api: "openai-completions",
+			provider: "nanogpt",
+			baseUrl: "https://nano-gpt.com/api/v1",
+		});
+		expect(hosted.compat.qwenTemplateReasoningEffort).toBe(false);
+		expect(hosted.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+
+		const qwen36 = createModel({
+			id: "qwen-3.6-27b",
+			api: "openai-completions",
+			provider: "llama.cpp",
+			baseUrl: "http://localhost:8080/v1",
+		});
+		expect(qwen36.compat.qwenTemplateReasoningEffort).toBe(false);
+		expect(qwen36.thinking?.requiresEffort).toBeUndefined();
+
+		// Local Ollama renders its own (Go) templates and keeps the native
+		// low/medium/high/max effort vocabulary.
+		const ollama = createModel({
+			id: "qwen3.8-27b",
+			api: "openai-completions",
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434/v1",
+		});
+		expect(ollama.compat.qwenTemplateReasoningEffort).toBe(false);
+		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
 	});
 });

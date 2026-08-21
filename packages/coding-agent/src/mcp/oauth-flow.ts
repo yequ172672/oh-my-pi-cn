@@ -54,6 +54,27 @@ export function mcpOAuthCredentialProfile(credentialId: string): string | undefi
 }
 
 /**
+ * Server URL embedded in a managed MCP OAuth credential id, or `undefined`
+ * for legacy random ids (`mcp_oauth_<rand>`) minted before URL-keyed ids.
+ *
+ * Inverse of {@link mcpOAuthCredentialId}. Mirrors {@link mcpOAuthCredentialProfile}:
+ * the URL contains `:` and `/`, so for profile-scoped ids the URL is everything
+ * after the profile segment; for legacy url-keyed ids (`mcp_oauth:<url>`) it is
+ * everything after the prefix. Lets the auth-broker — which never sees the MCP
+ * config — recover the server URL for the RFC 8707 fallback resource on refresh.
+ */
+export function mcpOAuthServerUrlFromCredentialId(credentialId: string): string | undefined {
+	if (credentialId.startsWith(MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX)) {
+		const separator = credentialId.indexOf(":", MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX.length);
+		return separator === -1 ? undefined : credentialId.slice(separator + 1) || undefined;
+	}
+	if (credentialId.startsWith(MCP_OAUTH_URL_CREDENTIAL_PREFIX)) {
+		return credentialId.slice(MCP_OAUTH_URL_CREDENTIAL_PREFIX.length) || undefined;
+	}
+	return undefined;
+}
+
+/**
  * Stored MCP OAuth credential. Refresh material is embedded so token refresh
  * works without any `auth` block persisted in (possibly shared) config files.
  */

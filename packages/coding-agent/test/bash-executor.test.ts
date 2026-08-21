@@ -438,6 +438,13 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				// The command runs through an interactive login zsh, which loads the
+				// system `/etc/zshrc`. On macOS that pulls in
+				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
+				// "Saving session..." lines to the captured output on exit. `HOME`
+				// does not isolate a system-level file; this is the opt-out Apple
+				// documents in that script.
+				SHELL_SESSIONS_DISABLE: "1",
 			},
 			prefix: undefined,
 		});

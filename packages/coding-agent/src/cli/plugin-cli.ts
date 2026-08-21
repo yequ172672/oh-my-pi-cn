@@ -14,7 +14,9 @@ import {
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
 	MarketplaceManager,
+	parsePluginId,
 } from "../extensibility/plugins/marketplace/index.js";
+import type { InstalledPlugin } from "../extensibility/plugins/types";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
@@ -763,8 +765,7 @@ async function handleConfig(
 		process.exit(1);
 	}
 
-	const plugins = await manager.list();
-	const plugin = plugins.find(p => p.name === pluginName);
+	const plugin = await manager.getPlugin(pluginName);
 
 	if (!plugin) {
 		console.error(chalk.red(`Plugin "${pluginName}" not found`));
@@ -866,8 +867,32 @@ async function handleConfig(
 	}
 }
 
+/**
+ * Enumerate every installed plugin to validate — npm/link plugins from
+ * {@link PluginManager.list} plus marketplace runtime packages, which `list()`
+ * intentionally omits. Marketplace summaries are resolved through their trusted
+ * install path; deduped by resolved package name using the same active-scope
+ * precedence as runtime loading.
+ */
+async function collectPluginsForValidation(manager: PluginManager): Promise<InstalledPlugin[]> {
+	const byName = new Map<string, InstalledPlugin>();
+	for (const plugin of await manager.list()) {
+		byName.set(plugin.name, plugin);
+	}
+	const mktMgr = await makeMarketplaceManager();
+	for (const summary of await mktMgr.listInstalledPlugins()) {
+		const entry = summary.entries[0];
+		if (!entry) continue;
+		const fallbackName = parsePluginId(summary.id)?.name ?? summary.id;
+		const resolved = await manager.getPlugin(fallbackName, { path: entry.installPath });
+		if (!resolved) continue;
+		byName.set(resolved.name, (await manager.getPlugin(resolved.name)) ?? resolved);
+	}
+	return [...byName.values()];
+}
+
 async function handleConfigValidate(manager: PluginManager, flags: { json?: boolean }): Promise<void> {
-	const plugins = await manager.list();
+	const plugins = await collectPluginsForValidation(manager);
 	const results: Array<{ plugin: string; key: string; error: string }> = [];
 
 	for (const plugin of plugins) {

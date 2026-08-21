@@ -41,6 +41,7 @@ import type { EditMode } from "../utils/edit-mode";
 import type { DiffError, DiffResult } from "./diff";
 import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
 import type { Operation } from "./modes/patch";
+import { type SloppySection, splitSloppySections } from "./sloppy";
 import type { PerFileDiffPreview } from "./streaming";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -638,6 +639,23 @@ function getHashlineInputRenderSummary(
 	return { entries: getHashlineInputSections(input) };
 }
 
+/**
+ * Per-file section descriptors for a (possibly mid-stream) sloppy payload.
+ * Paths live inside the payload's `[path]` headers, so the call header would
+ * otherwise render a bare `…` for the whole stream.
+ */
+function getSloppyInputRenderSummary(
+	args: EditRenderArgs,
+	editMode: EditMode | undefined,
+): { entries: SloppySection[] } | undefined {
+	const input = args.input ?? args._input;
+	if (editMode !== "sloppy" || typeof input !== "string") {
+		return undefined;
+	}
+	const entries = splitSloppySections(input);
+	return entries.length > 0 ? { entries } : undefined;
+}
+
 function getApplyPatchRenderSummary(
 	args: EditRenderArgs,
 	isPartial: boolean,
@@ -749,6 +767,7 @@ export const editToolRenderer = {
 		const renderContext = options.renderContext;
 		const editArgs = args as EditRenderArgs;
 		const hashlineInputSummary = getHashlineInputRenderSummary(editArgs, renderContext?.editMode);
+		const sloppyInputSummary = getSloppyInputRenderSummary(editArgs, renderContext?.editMode);
 		const applyPatchSummary = getApplyPatchRenderSummary(editArgs, options.isPartial, renderContext?.editMode);
 		const firstApplyPatchEntry = applyPatchSummary?.entries[0];
 		const firstHashlineInputEntry = hashlineInputSummary?.entries[0];
@@ -762,6 +781,7 @@ export const editToolRenderer = {
 					: (filePathFromEditEntry(firstEdit?.path) ??
 						getPartialJsonEditPath(editArgs) ??
 						firstHashlineInputEntry?.path ??
+						sloppyInputSummary?.entries[0]?.path ??
 						firstApplyPatchEntry?.path ??
 						"");
 		const rename =
@@ -771,7 +791,11 @@ export const editToolRenderer = {
 			firstApplyPatchEntry?.rename ??
 			firstHashlineInputEntry?.rename;
 		const op = editArgs.op || firstEdit?.op || firstApplyPatchEntry?.op || firstHashlineInputEntry?.op;
-		let fileCount = hashlineInputSummary?.entries.length ?? applyPatchSummary?.entries.length ?? 0;
+		let fileCount =
+			hashlineInputSummary?.entries.length ??
+			sloppyInputSummary?.entries.length ??
+			applyPatchSummary?.entries.length ??
+			0;
 		if (Array.isArray(editArgs.edits)) {
 			fileCount = countEditFiles(editArgs.edits);
 		}

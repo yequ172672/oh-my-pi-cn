@@ -163,5 +163,11 @@ try {
 			rescue.close();
 			await fs.rm(home, { recursive: true, force: true });
 		}
-	}, 30_000);
+		// Budget must exceed the sum of the bounds inside the test: two 15s marker waits
+		// plus the 5s shutdown probe are 35s of legitimate waiting, so a 30s cap let a
+		// loaded runner kill the test mid-`waitUntil` and report only "timed out after
+		// 30000ms" instead of the marker assertion that actually failed. Each consumer is
+		// a cold `bun` process importing the daemon module graph, so the spawns are slow
+		// exactly when the machine is busy.
+	}, 60_000);
 });

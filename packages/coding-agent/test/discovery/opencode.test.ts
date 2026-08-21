@@ -287,4 +287,50 @@ describe("OpenCode MCP discovery", () => {
 		expect(server?.command).toBe("server-bin");
 		expect(server?.args).toBeUndefined();
 	});
+
+	test("expands OpenCode {env:VAR} and {file:path} substitutions", async () => {
+		const secretFile = path.join(tempDir, "mcp-key.txt");
+		await fs.writeFile(secretFile, "file-token\n");
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					"env-server": {
+						type: "remote",
+						url: "https://mcp.example.xyz/{env:OMP_TEST_MCP_PATH}",
+						headers: { Authorization: "Bearer {env:OMP_TEST_MCP_KEY}" },
+					},
+					"file-server": {
+						type: "remote",
+						url: "https://mcp.example.xyz/mcp",
+						headers: { Authorization: "Bearer {file:./mcp-key.txt}" },
+					},
+					"missing-server": {
+						type: "remote",
+						url: "https://mcp.example.xyz/mcp",
+						headers: { Authorization: "Bearer {env:OMP_TEST_MCP_ABSENT}" },
+					},
+				},
+			}),
+		);
+
+		delete Bun.env.OMP_TEST_MCP_ABSENT;
+		Bun.env.OMP_TEST_MCP_KEY = "secret-token";
+		Bun.env.OMP_TEST_MCP_PATH = "mcp/server";
+		try {
+			const servers = await loadOpenCodeMcpConfig(tempDir);
+			const byName = Object.fromEntries(servers.map(server => [server.name, server]));
+
+			expect(byName["env-server"]).toMatchObject({
+				url: "https://mcp.example.xyz/mcp/server",
+				headers: { Authorization: "Bearer secret-token" },
+			});
+			expect(byName["file-server"]?.headers).toEqual({ Authorization: "Bearer file-token" });
+			// Unset env expands to empty string, matching OpenCode — never the literal token.
+			expect(byName["missing-server"]?.headers).toEqual({ Authorization: "Bearer " });
+		} finally {
+			delete Bun.env.OMP_TEST_MCP_KEY;
+			delete Bun.env.OMP_TEST_MCP_PATH;
+		}
+	});
 });

@@ -28,6 +28,7 @@ export { AbortError, ChildProcess, Exception, NonZeroExitError } from "./ptree";
 export * from "./runtime-install";
 export * from "./sanitize-text";
 export * from "./snowflake";
+export * from "./sqlite";
 export * from "./stderr-guard";
 export * from "./stream";
 export * from "./tab-spacing";

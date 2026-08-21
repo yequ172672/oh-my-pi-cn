@@ -300,6 +300,16 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
+	it("keeps query parameters in an unquoted internal URL", async () => {
+		const router = createInternalRouter({
+			"agent://reviewer?q=needle": { sourcePath: "/tmp/session/reviewer.md" },
+		});
+
+		await expect(
+			expandInternalUrls("cat agent://reviewer?q=needle", { skills: [], internalRouter: router }),
+		).resolves.toBe(`cat ${shellEscape("/tmp/session/reviewer.md")}`);
+	});
+
 	it("expands local:// URLs to filesystem paths without requiring preexisting files", async () => {
 		const localOptions = {
 			getArtifactsDir: () => "/tmp/session-artifacts",
@@ -310,6 +320,19 @@ describe("expandInternalUrls", () => {
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`mv /tmp/source.json ${shellEscape(expectedPath)}`,
+		);
+	});
+
+	it("preserves an adjacent command separator after an unquoted local URL", async () => {
+		const localOptions = {
+			getArtifactsDir: () => "/tmp/session-artifacts",
+			getSessionId: () => "session-1",
+		};
+		const command = 'bb review-packet gates --body-file local://body.txt; echo "exit=$?"';
+		const expectedPath = resolveLocalUrlToPath("local://body.txt", localOptions);
+
+		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
+			`bb review-packet gates --body-file ${shellEscape(expectedPath)}; echo "exit=$?"`,
 		);
 	});
 

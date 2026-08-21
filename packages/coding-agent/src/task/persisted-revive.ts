@@ -1,8 +1,10 @@
 import * as fs from "node:fs/promises";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
@@ -153,6 +155,17 @@ export function createPersistedSubagentReviverFactory(
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
 			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			// Wire the extension runtime exactly as the live executor does. Without
+			// this the runner stays pre-init, every action method throws
+			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
+			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
+			// blocking every tool — including the hidden `yield` — in the revived
+			// agent. `session_start` also re-runs so extensions restore per-session
+			// state (issue #8824).
+			await initializeExtensions(session, {
+				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+			});
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,

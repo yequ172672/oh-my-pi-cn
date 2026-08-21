@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
 	type Component,
 	Container,
@@ -10,20 +10,12 @@ import {
 	type NativeScrollbackReplay,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { StressRenderScheduler } from "./render-stress-scheduler";
 import { defaultEditorTheme } from "./test-themes";
 import { VirtualTerminal } from "./virtual-terminal";
 
-const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
-
-beforeEach(() => {
-	delete Bun.env.HERDR_ENV;
-});
-
-afterEach(() => {
-	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
-	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
-});
+withoutTerminalMultiplexer();
 
 // Behavioral tests for TUI.requestComponentRender: a component whose own
 // content changed (spinner frame, blink) asks for a component-scoped frame.
@@ -401,6 +393,45 @@ describe("TUI.requestComponentRender", () => {
 				expect(buffer.split(marker)).toHaveLength(2);
 			}
 			expect(buffer).not.toContain("panel-");
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+	it("keeps a pinned panel out of scrollback under an unpinned streaming transcript seam", async () => {
+		// Regression for the /btw panel re-committing its frame while the primary
+		// turn streams (#8793): the transcript reports the topmost, UNPINNED seam,
+		// so the frame-wide pin policy is false, yet an anchored pinned panel below
+		// it must still never commit its scrolled-off rows to native scrollback.
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const markers = Array.from({ length: 5 }, (_unused, index) => `HIST-${index}`);
+		const transcript = new LiveHead([...markers, "streaming-tail"]);
+		transcript.setSeam(markers.length); // committed prefix + one live (streaming) tail row
+		const status = new AnchoredStatusContainer();
+		const editor = new CountingLines([`editor${CURSOR_MARKER}`]);
+		tui.addChild(transcript);
+		tui.addChild(status);
+		tui.addChild(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const panel = new CountingLines(["btw-0"]);
+			status.addChild(panel);
+			tui.requestRender();
+			await scheduler.drain(term);
+			for (let tick = 1; tick <= 12; tick++) {
+				panel.set(Array.from({ length: tick + 1 }, (_row, index) => `BTWROW-${tick}-${index}`));
+				tui.requestComponentRender(panel);
+				await scheduler.drain(term);
+			}
+
+			// Native scrollback is everything above the visible viewport; mid-stream
+			// it must hold zero rows of the growing pinned panel.
+			const history = strip(term.getScrollBuffer()).slice(0, -term.rows);
+			expect(history.filter(row => row.startsWith("BTWROW-"))).toEqual([]);
 		} finally {
 			tui.stop();
 			await term.flush();

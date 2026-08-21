@@ -111,19 +111,20 @@ function thinkingPair(baseId: string, name: string): EffortVariantFamily {
 	};
 }
 
-type DevinTierRoutes = Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string>>;
+type TierRoutes = Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string>>;
 
 /** Devin families with a `-max` sibling: five wire tiers, `low` floor. */
 const DEVIN_FIVE_TIER_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 /** Pre-5.6 Devin GPT families top out at `-xhigh`: four wire tiers, `low` floor. */
 const DEVIN_FOUR_TIER_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 
-function devinTierFamily(
-	id: string,
-	name: string,
-	routes: DevinTierRoutes,
-	efforts: readonly Effort[],
-): EffortVariantFamily {
+/**
+ * Build one effort-tier family from a tier→wire-id map: routing keeps only the
+ * listed efforts, `members` dedupes the targets in tier order, and thinking is
+ * `mode: "effort"` (mandatory when the family has no `off` route). Shared by the
+ * Devin and Cursor tables, whose per-effort siblings follow the same shape.
+ */
+function tierFamily(id: string, name: string, routes: TierRoutes, efforts: readonly Effort[]): EffortVariantFamily {
 	const routing: Partial<Record<Effort | "off", string>> = {};
 	if (routes.off) routing.off = routes.off;
 	for (const effort of efforts) {
@@ -177,7 +178,7 @@ function devinTierFamily(
 function devinGpt56Families(variant: "luna" | "sol" | "terra", name: string): readonly EffortVariantFamily[] {
 	const base = `gpt-5-6-${variant}`;
 	return [
-		devinTierFamily(
+		tierFamily(
 			base,
 			name,
 			{
@@ -190,7 +191,7 @@ function devinGpt56Families(variant: "luna" | "sol" | "terra", name: string): re
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			`${base}-fast`,
 			`${name} Fast`,
 			{
@@ -395,7 +396,7 @@ export const GEMINI_CLI_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 };
 export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-5",
 			"Claude Opus 5",
 			{
@@ -407,7 +408,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-5-fast",
 			"Claude Opus 5 Fast",
 			{
@@ -419,7 +420,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-fable-5",
 			"Claude Fable 5",
 			{
@@ -431,7 +432,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-sonnet-5",
 			"Claude Sonnet 5",
 			{
@@ -443,7 +444,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-4-7",
 			"Claude Opus 4.7",
 			{
@@ -455,7 +456,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-4-7-fast",
 			"Claude Opus 4.7 Fast",
 			{
@@ -467,7 +468,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-4-8",
 			"Claude Opus 4.8",
 			{
@@ -479,7 +480,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"claude-opus-4-8-fast",
 			"Claude Opus 4.8 Fast",
 			{
@@ -491,7 +492,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-2",
 			"GPT-5.2",
 			{
@@ -503,7 +504,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-3-codex",
 			"GPT-5.3 Codex",
 			{
@@ -514,7 +515,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-3-codex-fast",
 			"GPT-5.3 Codex Fast",
 			{
@@ -525,7 +526,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-4",
 			"GPT-5.4",
 			{
@@ -537,7 +538,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-4-fast",
 			"GPT-5.4 Fast",
 			{
@@ -549,7 +550,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-4-mini",
 			"GPT-5.4 Mini",
 			{
@@ -560,7 +561,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-5",
 			"GPT-5.5",
 			{
@@ -572,7 +573,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FOUR_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gpt-5-5-fast",
 			"GPT-5.5 Fast",
 			{
@@ -587,7 +588,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 		...devinGpt56Families("luna", "GPT-5.6 Luna"),
 		...devinGpt56Families("sol", "GPT-5.6 Sol"),
 		...devinGpt56Families("terra", "GPT-5.6 Terra"),
-		devinTierFamily(
+		tierFamily(
 			"kimi-k3",
 			"Kimi K3",
 			{
@@ -597,7 +598,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Low, Effort.High, Effort.Max],
 		),
-		devinTierFamily(
+		tierFamily(
 			"swe-1-7",
 			"SWE-1.7",
 			{
@@ -606,7 +607,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Medium, Effort.Max],
 		),
-		devinTierFamily(
+		tierFamily(
 			"grok-4-5",
 			"Grok 4.5",
 			{
@@ -616,7 +617,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Low, Effort.Medium, Effort.High],
 		),
-		devinTierFamily(
+		tierFamily(
 			"inkling",
 			"Inkling",
 			{
@@ -629,7 +630,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
-		devinTierFamily(
+		tierFamily(
 			"gemini-3-1-pro",
 			"Gemini 3.1 Pro",
 			{
@@ -638,7 +639,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Low, Effort.High],
 		),
-		devinTierFamily(
+		tierFamily(
 			"gemini-3-5-flash",
 			"Gemini 3.5 Flash",
 			{
@@ -649,7 +650,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 		),
-		devinTierFamily(
+		tierFamily(
 			"gemini-3-6-flash",
 			"Gemini 3.6 Flash",
 			{
@@ -660,7 +661,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 		),
-		devinTierFamily(
+		tierFamily(
 			"gemini-3-flash",
 			"Gemini 3 Flash",
 			{
@@ -694,7 +695,7 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 		},
 		// GLM-5.2 1M — paid variants that consume weekly quota.  Collapse the
 		// three 1M-context variants into one entry with proper effort routing.
-		devinTierFamily(
+		tierFamily(
 			"glm-5-2-1m",
 			"GLM-5.2 1M",
 			{
@@ -707,11 +708,79 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	],
 };
 
+/** Cursor's Grok tier tokens equal the effort id, so routing is a direct map. */
+const CURSOR_GROK_45_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
+const CURSOR_GROK_46_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+/** Cursor GPT-5.6 (Luna/Sol/Terra) serves the full five-tier `low..max` scale. */
+const CURSOR_GPT_56_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+/**
+ * Cursor serves Grok 4.5/4.6 as per-effort sibling ids
+ * (`cursor-grok-4.6-low|-medium|-high|-xhigh`) alongside a parallel `-fast`
+ * service-tier lane (`-low-fast`, …). Each lane collapses into its own logical
+ * model — the `-fast` axis is a sibling family, never a second routing
+ * dimension — with effort routing onto the live sibling wire ids.
+ */
+function cursorGrokFamilies(version: "4.5" | "4.6", efforts: readonly Effort[]): readonly EffortVariantFamily[] {
+	const build = (fast: boolean): EffortVariantFamily => {
+		const suffix = fast ? "-fast" : "";
+		const routes: TierRoutes = {};
+		for (const effort of efforts) {
+			routes[effort] = `cursor-grok-${version}-${effort}${suffix}`;
+		}
+		return tierFamily(`cursor-grok-${version}${suffix}`, `Grok ${version}${fast ? " Fast" : ""}`, routes, efforts);
+	};
+	return [build(false), build(true)];
+}
+
+/**
+ * Cursor serves GPT-5.6 (Luna/Sol/Terra) as per-tier sibling ids
+ * (`gpt-5.6-luna-none|-low|-medium|-high|-xhigh|-max`) with a parallel `-fast`
+ * service-tier lane (`gpt-5.6-luna-high-fast`, …). Same shape as Devin's
+ * `devinGpt56Families`, but cursor keys the version with a dot, marks the
+ * thinking-off tier `-none`, and names the fast lane with `-fast` (Devin uses
+ * `-priority`). Each lane collapses into its own logical model — `-fast` is a
+ * sibling SKU, never a second routing dimension — while the 1M / Max Mode SKU
+ * stays a separate row (handled by discovery's context-window resolution).
+ */
+function cursorGpt56Families(variant: "luna" | "sol" | "terra", name: string): readonly EffortVariantFamily[] {
+	const build = (fast: boolean): EffortVariantFamily => {
+		const suffix = fast ? "-fast" : "";
+		const base = `gpt-5.6-${variant}`;
+		return tierFamily(
+			`${base}${suffix}`,
+			`${name}${fast ? " Fast" : ""}`,
+			{
+				off: `${base}-none${suffix}`,
+				low: `${base}-low${suffix}`,
+				medium: `${base}-medium${suffix}`,
+				high: `${base}-high${suffix}`,
+				xhigh: `${base}-xhigh${suffix}`,
+				max: `${base}-max${suffix}`,
+			},
+			CURSOR_GPT_56_EFFORTS,
+		);
+	};
+	return [build(false), build(true)];
+}
+
+/** `cursor` per-effort sibling families collapsed per service-tier lane: Grok 4.5/4.6 plus GPT-5.6 Luna/Sol/Terra. */
+export const CURSOR_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
+	families: [
+		...cursorGrokFamilies("4.5", CURSOR_GROK_45_EFFORTS),
+		...cursorGrokFamilies("4.6", CURSOR_GROK_46_EFFORTS),
+		...cursorGpt56Families("luna", "GPT-5.6 Luna"),
+		...cursorGpt56Families("sol", "GPT-5.6 Sol"),
+		...cursorGpt56Families("terra", "GPT-5.6 Terra"),
+	],
+};
+
 /** Provider id → hand collapse table. The CCA providers diverge on thinking transport. */
 export const VARIANT_COLLAPSE_TABLES: Readonly<Record<string, VariantCollapseTable>> = {
 	"google-antigravity": ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
 	"google-gemini-cli": GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
 	devin: DEVIN_VARIANT_COLLAPSE_TABLE,
+	cursor: CURSOR_VARIANT_COLLAPSE_TABLE,
 };
 
 /**

@@ -280,12 +280,21 @@ export class VirtualTerminal implements Terminal {
 
 	// --- Test-only helpers ---------------------------------------------------
 
-	/** Wait for TUI's throttled render pipeline to settle (matches the ~33ms frame budget). */
-	async waitForRender(): Promise<void> {
+	/**
+	 * Wait for TUI's throttled render pipeline to settle (matches the ~33ms
+	 * frame budget). Fixed sleeps race starved CI timers, so callers asserting
+	 * on a specific frame pass `until`; polling continues (10ms slices, ~2s
+	 * cap) until the predicate observes the expected viewport.
+	 */
+	async waitForRender(until?: () => boolean): Promise<void> {
 		const nextTick = Promise.withResolvers<void>();
 		process.nextTick(nextTick.resolve);
 		await nextTick.promise;
 		await Bun.sleep(40);
+		if (until) {
+			const deadline = Date.now() + 2_000;
+			while (!until() && Date.now() < deadline) await Bun.sleep(10);
+		}
 		await this.flush();
 	}
 

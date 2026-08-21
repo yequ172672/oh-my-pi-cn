@@ -1,6 +1,5 @@
 import {
 	type Component,
-	Container,
 	extractPrintableText,
 	fuzzyFilter,
 	matchesKey,
@@ -9,9 +8,10 @@ import {
 	Text,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import { t } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session
@@ -51,7 +51,7 @@ class UserMessageList implements Component {
 
 	#renderStatusLine(_total: number): string {
 		const query = this.#searchQuery.trim();
-		const suffix = query ? `Search: ${this.#searchQuery}` : "Type to search";
+		const suffix = query ? `${t("selector.search")} ${this.#searchQuery}` : t("selector.typeToSearch");
 		return theme.fg("muted", `  ${suffix}`);
 	}
 
@@ -86,7 +86,7 @@ class UserMessageList implements Component {
 		const lines: string[] = [];
 
 		if (this.messages.length === 0) {
-			lines.push(theme.fg("muted", "  No user messages found"));
+			lines.push(theme.fg("muted", `  ${t("selector.noUserMessages")}`));
 			return lines;
 		}
 
@@ -121,14 +121,14 @@ class UserMessageList implements Component {
 
 			// Second line: metadata (position in history)
 			const position = this.messages.indexOf(message) + 1;
-			const metadata = `  Message ${position} of ${this.messages.length}`;
+			const metadata = `  ${t("selector.messagePosition", { position, total: this.messages.length })}`;
 			const metadataLine = theme.fg("muted", metadata);
 			messageLines.push(metadataLine);
 			messageLines.push(""); // Blank line between messages
 		}
 
 		if (total === 0) {
-			lines.push(theme.fg("muted", "  No matching messages"));
+			lines.push(theme.fg("muted", `  ${t("selector.noMatchingMessages")}`));
 		} else {
 			const visibleCount = endIndex - startIndex;
 			const linesPerItem = visibleCount > 0 ? messageLines.length / visibleCount : 1;
@@ -190,18 +190,13 @@ class UserMessageList implements Component {
 /**
  * Component that renders a user message selector for branching
  */
-export class UserMessageSelectorComponent extends Container {
+export class UserMessageSelectorComponent extends OverlayPanel {
 	#messageList: UserMessageList;
 
 	constructor(messages: UserMessageItem[], onSelect: (entryId: string) => void, onCancel: () => void) {
-		super();
+		super(t("selector.branchTitle"));
 
-		// Add header
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.bold("Branch from Message"), 1, 0));
-		this.addChild(new Text(theme.fg("muted", "Select a message to create a new branch from that point"), 1, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("muted", t("selector.branchHelp")), 0, 0));
 		this.addChild(new Spacer(1));
 
 		// Create message list
@@ -211,9 +206,7 @@ export class UserMessageSelectorComponent extends Container {
 
 		this.addChild(this.#messageList);
 
-		// Add bottom border
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		// Auto-cancel if no messages
 		if (messages.length === 0) {

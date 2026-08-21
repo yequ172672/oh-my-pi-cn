@@ -37,6 +37,8 @@ interface BaseSettingDef {
 	path: SettingPath;
 	label: string;
 	description: string;
+	/** Risk note shown in warning styling; set for settings that can get the user flagged or banned. */
+	warning?: string;
 	tab: SettingTab;
 	/** Section within the tab; items are ordered by TAB_GROUPS[tab] and rendered under a heading row. */
 	group?: string;
@@ -171,6 +173,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		path,
 		label: localizeUiText(ui.label),
 		description: localizeUiText(ui.description),
+		warning: ui.warning ? localizeUiText(ui.warning) : undefined,
 		tab: ui.tab,
 		group: ui.group,
 		condition,

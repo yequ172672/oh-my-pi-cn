@@ -32,7 +32,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { withEnv } from "./helpers";
+import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -151,6 +151,8 @@ function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionI
 		}
 	}
 }
+
+withOfficialAnthropicEndpoint();
 
 describe("Anthropic request fingerprint alignment", () => {
 	it("maps Stainless arch values from explicit inputs", () => {

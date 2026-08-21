@@ -1,6 +1,10 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import {
+	SPINNER_RENDER_INTERVAL_MS,
+	stopSharedSpinnerTicker,
+	ToolExecutionComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -12,6 +16,13 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 describe("ToolExecutionComponent live preview spinners", () => {
 	beforeAll(async () => {
 		await initTheme();
+	});
+
+	// Earlier test files may leak live blocks (components never stopAnimation'd),
+	// which keeps the shared ticker armed on a REAL interval and makes these
+	// fake-timer assertions observe a pre-existing timer instead of a fresh one.
+	beforeEach(() => {
+		stopSharedSpinnerTicker();
 	});
 
 	afterEach(() => {
@@ -186,6 +197,27 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("pins a pending hub wait before the first progress snapshot arrives", () => {
+		const component = new ToolExecutionComponent(
+			"hub",
+			{ op: "wait" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		try {
+			transcript.render(80);
+			expect(component.isNativeScrollbackLiveRegionPinned()).toBe(true);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(true);
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("pins the displaceable hub waiting poll and releases it once jobs settle", () => {
 		const component = new ToolExecutionComponent(
 			"hub",
@@ -220,6 +252,40 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(false);
 		} finally {
 			component.stopAnimation();
+		}
+	});
+
+	// Regression (issue #8731): concurrent live tool blocks — e.g. parallel task
+	// subagents — must share ONE spinner timer, not one per block, or active-work
+	// CPU scales with block count.
+	it("drives every concurrent live block from a single shared spinner timer", () => {
+		vi.useFakeTimers();
+		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+		const renders = [vi.fn(), vi.fn(), vi.fn()];
+		const components = renders.map(
+			requestComponentRender =>
+				new ToolExecutionComponent(
+					"eval",
+					{ language: "py", code: "import time\ntime.sleep(10)" },
+					{},
+					undefined,
+					{ requestRender: vi.fn(), requestComponentRender } as unknown as TUI,
+					process.cwd(),
+				),
+		);
+
+		try {
+			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === SPINNER_RENDER_INTERVAL_MS).length;
+			// One shared ticker for all three live blocks, not three.
+			expect(spinnerTimers).toBe(1);
+
+			// A single tick repaints every registered block in lockstep.
+			vi.advanceTimersByTime(SPINNER_RENDER_INTERVAL_MS);
+			for (const requestComponentRender of renders) {
+				expect(requestComponentRender).toHaveBeenCalledTimes(1);
+			}
+		} finally {
+			for (const component of components) component.stopAnimation();
 		}
 	});
 });

@@ -22,7 +22,7 @@ import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { resolveBareVariantAlias, resolveVariantAlias } from "@oh-my-pi/pi-catalog/variant-collapse";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
@@ -596,6 +596,41 @@ function includeSyntheticAllowedModels(available: Model<Api>[], allowedModels: I
 }
 
 /**
+ * Provider-lock a raw-id cross match.
+ *
+ * A slash-prefixed selector like `anthropic/claude-opus-5` is ambiguous: it is
+ * both the `anthropic` provider's canonical selector and — verbatim — an
+ * OpenRouter aggregator model id. When the named provider genuinely carries
+ * that model id in the bundled catalog but the model is missing from the
+ * candidate set (provider disabled, no credentials, or filtered out), letting
+ * the raw-id fallback re-bind the request onto a different provider's
+ * same-named model is a silent, expensive surprise — typically the aggregator's
+ * copy (OpenRouter bills published per-token Claude prices). Such a reference
+ * is provider-locked: it must fail rather than shadow.
+ *
+ * The lock only applies when the named provider carries the exact id in the
+ * bundled catalog. An aggregator raw id the named provider does NOT carry
+ * (e.g. `openai/gpt-4o:extended` — `openai` bundles `gpt-4o`, not the
+ * `:extended` variant) is legitimately an aggregator id and keeps resolving
+ * through the raw-id fallback, so bare aggregator selectors keep working.
+ */
+function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): boolean {
+	const slashIdx = pattern.indexOf("/");
+	if (slashIdx <= 0) {
+		return false;
+	}
+	const provider = pattern.slice(0, slashIdx).toLowerCase();
+	const modelId = pattern.slice(slashIdx + 1).toLowerCase();
+	if (matchedModel.provider.toLowerCase() === provider) {
+		return false;
+	}
+	// Case-insensitive on both halves: the surrounding matcher lowercases the
+	// selector before comparing ids, so the lock must not evaporate on case
+	// variance (catalog provider keys are lowercase; model ids may not be).
+	return getBundledModels(provider as GeneratedProvider).some(m => m.id.toLowerCase() === modelId);
+}
+
+/**
  * Find an exact explicit provider/model match.
  */
 function findExactModelReferenceMatch(modelReference: string, availableModels: Model<Api>[]): Model<Api> | undefined {
@@ -644,11 +679,17 @@ function matchModel(
 	// Exact ID match (case-insensitive) — this must happen before provider-scoped
 	// fuzzy matching so raw IDs that contain slashes (for example OpenRouter model
 	// IDs like "openai/gpt-4o:extended") still resolve as IDs instead of being
-	// misread as a provider-qualified selector.
+	// misread as a provider-qualified selector. A provider-qualified pattern
+	// whose named provider carries the id stays locked to that provider when its
+	// only exact-id matches live on a different provider (isProviderLockedCrossMatch).
 	const lowerPattern = modelPattern.toLowerCase();
 	const exactMatches = availableModels.filter(m => m.id.toLowerCase() === lowerPattern);
 	if (exactMatches.length > 0) {
-		return pickPreferredModel(exactMatches, context);
+		const unlockedMatches = exactMatches.filter(m => !isProviderLockedCrossMatch(modelPattern, m));
+		if (unlockedMatches.length > 0) {
+			return pickPreferredModel(unlockedMatches, context);
+		}
+		return undefined;
 	}
 
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileModelId(modelPattern, availableModels);
@@ -1710,11 +1751,14 @@ function findExactCliModel(
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
 	// then fall back to catalog order. This covers aggregator-style flat ids
 	// that merely look provider-qualified (e.g. "openai/gpt-oss-120b" hosted on
-	// OpenRouter), where the provider/id decomposition above found nothing.
+	// OpenRouter), where the provider/id decomposition above found nothing. A
+	// provider-qualified selector whose named provider carries the id must not
+	// re-bind onto another provider's same-named flat id
+	// (isProviderLockedCrossMatch); it stays provider-locked and fails instead.
 	const lower = selector.toLowerCase();
 	const isFlatMatch = (model: Model<Api>) =>
 		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
-	const preferred = availableModels.find(isFlatMatch);
+	const preferred = availableModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
 	if (preferred) return preferred;
 	// The unauthenticated catalog fallback is a weak match: a bare id like
 	// `default` collides with the bundled `cursor/default` model, which must not
@@ -1723,7 +1767,9 @@ function findExactCliModel(
 	// role gets a chance first; the deferred fuzzy fallback below still recovers
 	// the catalog id when no role matches.
 	if (options?.catalogFallback === false) return undefined;
-	return availableModels === allModels ? undefined : allModels.find(isFlatMatch);
+	return availableModels === allModels
+		? undefined
+		: allModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
 }
 
 export interface ResolveCliModelResult {

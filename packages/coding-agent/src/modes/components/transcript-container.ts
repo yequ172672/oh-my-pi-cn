@@ -61,6 +61,10 @@ function isBlockFinalized(child: Component): boolean {
 	return fn ? fn.call(child) : true;
 }
 
+function isBlockPinned(child: Component): boolean {
+	return (child as Component & Partial<NativeScrollbackLiveRegion>).isNativeScrollbackLiveRegionPinned?.() === true;
+}
+
 function getBlockVersion(child: Component): number | undefined {
 	const fn = (child as Component & FinalizableBlock).getTranscriptBlockVersion;
 	return fn ? fn.call(child) : undefined;
@@ -176,6 +180,9 @@ export class TranscriptContainer
 	// settled rows. TUI commits rows to native scrollback only above it.
 	#nativeScrollbackLiveRegionStart: number | undefined;
 	#nativeScrollbackLiveRegionPinned = false;
+	// First pinned live block's body row. May sit below the earliest live seam
+	// when an unpinned predecessor (pending bash/eval) is still mutating.
+	#nativeScrollbackLiveRegionPinnedStart: number | undefined;
 	// Persistent assembled transcript rows. Rows before the stable floor are
 	// byte-identical to the previous render; rows at/after it were re-pushed.
 	#lines: string[] = [];
@@ -360,9 +367,19 @@ export class TranscriptContainer
 		return this.#nativeScrollbackLiveRegionStart;
 	}
 
-	/** Propagates viewport pinning from the first still-mutating transcript block. */
+	/** True when any still-mutating descendant opted into viewport pinning. */
 	isNativeScrollbackLiveRegionPinned(): boolean {
 		return this.#nativeScrollbackLiveRegionPinned;
+	}
+
+	getNativeScrollbackLiveRegionPinnedStart(): number | undefined {
+		return this.#nativeScrollbackLiveRegionPinned ? this.#nativeScrollbackLiveRegionPinnedStart : undefined;
+	}
+
+	#notePinnedLiveBlock(pinAt: number): void {
+		if (this.#nativeScrollbackLiveRegionPinned) return;
+		this.#nativeScrollbackLiveRegionPinned = true;
+		this.#nativeScrollbackLiveRegionPinnedStart = pinAt;
 	}
 
 	/**
@@ -377,7 +394,7 @@ export class TranscriptContainer
 	isBlockUncommitted(component: Component): boolean {
 		for (const segment of this.#segments) {
 			if (segment.component !== component) continue;
-			return segment.rowCount === 0 || segment.startRow >= this.#committedRows;
+			return segment.rowCount === 0 || segment.startRow + segment.sep >= this.#committedRows;
 		}
 		return true;
 	}
@@ -453,6 +470,7 @@ export class TranscriptContainer
 		width = Math.max(1, width);
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackLiveRegionPinned = false;
+		this.#nativeScrollbackLiveRegionPinnedStart = undefined;
 
 		const count = this.children.length;
 
@@ -467,7 +485,13 @@ export class TranscriptContainer
 		for (let i = 0; i < count && i < this.#segments.length; i++) {
 			const previous = this.#segments[i];
 			if (previous === undefined) continue;
-			if (previous.startRow >= this.#committedRows) break;
+			// The leading separator is container-owned spacing and sits in the
+			// committed prefix (live-region start is `startRow + sep`). Sealing
+			// on `startRow` would freeze a pinned hub-wait/todo card the moment
+			// that blank committed — then duration/shimmer ticks smear into
+			// native scrollback.
+			const bodyStart = previous.startRow + previous.sep;
+			if (bodyStart >= this.#committedRows) break;
 			if (previous.rowCount === 0 || previous.component !== this.children[i]) continue;
 			sealCommittedSnapshot(previous.component);
 		}
@@ -484,10 +508,6 @@ export class TranscriptContainer
 			if (!isBlockFinalized(this.children[i]!)) {
 				liveStartIndex = i;
 				hasLiveBlock = true;
-				this.#nativeScrollbackLiveRegionPinned =
-					(
-						this.children[i] as Component & Partial<NativeScrollbackLiveRegion>
-					).isNativeScrollbackLiveRegionPinned?.() === true;
 				break;
 			}
 		}
@@ -566,6 +586,7 @@ export class TranscriptContainer
 				if (hasLiveBlock && i === liveStartIndex) {
 					this.#nativeScrollbackLiveRegionStart = row;
 				}
+				if (!finalized && isBlockPinned(child)) this.#notePinnedLiveBlock(row);
 				if (chainStable && !(reusable && previous.rowCount === 0 && previous.startRow === row)) {
 					chainStable = false;
 					lines.length = row;
@@ -598,16 +619,19 @@ export class TranscriptContainer
 			// settled); the boundary then extends through the live block's
 			// declared settled rows, mapped from its raw render into the
 			// stripped contribution.
-			if (hasLiveBlock && i === liveStartIndex) {
-				let settled = 0;
+			let settled = 0;
+			if (!finalized || (hasLiveBlock && i === liveStartIndex)) {
 				const settledRaw = getBlockSettledRows(child);
 				if (settledRaw > 0) {
 					let lead = 0;
 					while (lead < raw.length && isPlainBlank(raw[lead]!)) lead++;
 					settled = Math.max(0, Math.min(contribution.length, settledRaw - lead));
 				}
+			}
+			if (hasLiveBlock && i === liveStartIndex) {
 				this.#nativeScrollbackLiveRegionStart = row + sep + settled;
 			}
+			if (!finalized && isBlockPinned(child)) this.#notePinnedLiveBlock(row + sep + settled);
 
 			const rowCount = sep + contribution.length;
 			const stable = chainStable && reusable && previous.startRow === row && previous.sep === sep;

@@ -23,7 +23,12 @@ import {
 	VERSION,
 } from "../distribution";
 import { theme } from "../modes/theme/theme";
-import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import {
+	isTimeoutError,
+	isUnsupportedProxyError,
+	unsupportedProxyMessage,
+	withTimeoutSignal,
+} from "../utils/fetch-timeout";
 
 /** Public fork endpoints used by `omp update` and release-binary updates. */
 export const FORK_REPOSITORY = DISTRIBUTION_REPOSITORY;
@@ -270,6 +275,7 @@ async function getReleaseBinaryAsset(
 		if (isTimeoutError(err)) {
 			throw new Error("Timed out fetching GitHub release metadata after 30s", { cause: err });
 		}
+		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
 	if ((response.status === 403 && !githubToken) || response.status === 429) {
@@ -309,6 +315,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		if (isTimeoutError(err)) {
 			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
 		}
+		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
 	if (!response.ok || !response.body) {
@@ -348,6 +355,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		if (isTimeoutError(err)) {
 			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
 		}
+		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
 }
@@ -463,6 +471,14 @@ function tryRealpath(p: string): string | undefined {
 	}
 }
 
+function isSymlinkPath(p: string): boolean {
+	try {
+		return fs.lstatSync(p).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
 function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
 	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
 	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
@@ -536,6 +552,14 @@ interface UpdateMethodResolutionOptions {
 	 * preserves a global package symlink instead of resolving into its checkout.
 	 */
 	ompLinkTarget?: string;
+	/**
+	 * Whether package-manager routing (bun/npm) is permitted. Binary-only
+	 * releases pass `false`: a manager launcher then resolves to `"binary"` and
+	 * is taken over in place rather than reinstalled through its manager. Defaults
+	 * to `true` in {@link resolveUpdateMethod} so callers that only classify need
+	 * not set it.
+	 */
+	allowPackageManagers?: boolean;
 }
 
 type UpdateTarget =
@@ -552,6 +576,7 @@ function resolveUpdateMethod(
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
 	const {
+		allowPackageManagers = true,
 		bunGlobalDir,
 		homebrewPrefix,
 		miseBinDirs = [],
@@ -583,6 +608,7 @@ function resolveUpdateMethod(
 		globalBinDir: bunBinDir,
 	});
 	if (
+		allowPackageManagers &&
 		bunBinDir &&
 		isPathInDirectory(ompPath, bunBinDir) &&
 		!isStandaloneRegularFile &&
@@ -592,6 +618,7 @@ function resolveUpdateMethod(
 	}
 	const npmNodeModulesDir = resolveNpmGlobalNodeModulesDir(npmBinDir, platform);
 	if (
+		allowPackageManagers &&
 		npmBinDir &&
 		isPathInDirectory(ompPath, npmBinDir) &&
 		!isStandaloneRegularFile &&
@@ -639,10 +666,25 @@ export function resolveUpdateTargetFromPath(
 		ompLinkTarget,
 	});
 	if (method === "binary") {
-		// A package-manager-enabled update follows a foreign alias to replace
-		// its standalone binary. Binary-only releases intentionally replace the
-		// selected manager launcher in place.
-		const binaryPath = options.allowPackageManagers && ompIsSymlink ? (ompRealpath ?? ompPath) : ompPath;
+		// A symlinked launcher created by bun/npm is taken over in place on a
+		// binary-only release: routing through the manager is impossible, so the
+		// standalone binary replaces the launcher and keeps the PATH entry live.
+		// Every other symlink — a foreign alias, or an admin symlink into a
+		// shared install — is self-healing: update the real binary it resolves
+		// to and leave the launcher untouched, in every distribution channel.
+		// The old channel gate clobbered these foreign launchers on binary-only
+		// releases (EACCES on a root-owned link dir, or a stale split-brain copy
+		// of the binary shadowing the shared install).
+		const managerLauncher =
+			ompIsSymlink &&
+			!options.allowPackageManagers &&
+			resolveUpdateMethod(ompPath, bunBinDir, {
+				...options,
+				allowPackageManagers: true,
+				ompIsRegularFile,
+				ompLinkTarget,
+			}) !== "binary";
+		const binaryPath = ompIsSymlink && !managerLauncher ? (ompRealpath ?? ompPath) : ompPath;
 		return { method, path: binaryPath, replacesSymlink: ompIsSymlink && binaryPath === ompPath };
 	}
 	if (method === "bun" || method === "npm") return { method, path: ompPath };
@@ -651,25 +693,34 @@ export function resolveUpdateTargetFromPath(
 /**
  * Resolve how the running install should be updated.
  *
- * `allowPackageManagers: false` skips the `bun pm bin -g` / `npm prefix -g`
- * probes entirely — used for binary-only releases, where routing through a
- * package manager is never valid and the probes would be wasted subprocesses.
+ * `allowPackageManagers: false` disables bun/npm routing — used for
+ * binary-only releases, where reinstalling through a package manager is never
+ * valid. The `bun pm bin -g` / `npm prefix -g` probes are then skipped unless
+ * the launcher is a symlink, whose bin dirs distinguish a manager launcher
+ * (taken over in place) from a foreign symlink (resolved to its real binary).
  * Homebrew/mise detection always runs: both managers install GitHub release
  * binaries and stay valid regardless of how the release is distributed.
  */
 async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
-	const bunBinDir = options.allowPackageManagers ? await getBunGlobalBinDir() : undefined;
-	const npmBinDir = options.allowPackageManagers ? await getNpmGlobalBinDir() : undefined;
 	const homebrewPrefix = await getHomebrewFormulaPrefix();
 	const miseAvailable = $which("mise") !== undefined;
 	const miseBinDirs = miseAvailable ? await getMiseBinDirs() : [];
 	const miseDataDir = miseAvailable ? getMiseDataDir() : undefined;
 	const ompPath = resolveOmpPath();
 
+	// Binary-only releases skip package-manager routing, but a symlinked
+	// launcher still needs the manager bin dirs to tell a bun/npm launcher
+	// (taken over in place) from a foreign symlink (resolved to its real
+	// binary). A plain-file install never needs the distinction, so the common
+	// case stays probe-free.
+	const probeManagers = options.allowPackageManagers || (ompPath !== undefined && isSymlinkPath(ompPath));
+	const bunBinDir = probeManagers ? await getBunGlobalBinDir() : undefined;
+	const npmBinDir = probeManagers ? await getNpmGlobalBinDir() : undefined;
+
 	if (ompPath) {
 		return resolveUpdateTargetFromPath(ompPath, bunBinDir, {
 			allowPackageManagers: options.allowPackageManagers,
-			bunGlobalDir: options.allowPackageManagers ? process.env.BUN_INSTALL_GLOBAL_DIR : undefined,
+			bunGlobalDir: probeManagers ? process.env.BUN_INSTALL_GLOBAL_DIR : undefined,
 			homebrewPrefix,
 			miseBinDirs,
 			miseDataDir,
@@ -741,6 +792,7 @@ async function fetchLatestManifest(
 				cause: err,
 			});
 		}
+		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
 	if (!response.ok) {

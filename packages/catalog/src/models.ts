@@ -1,6 +1,5 @@
-import { buildModel } from "./build";
 import MODELS from "./models.json" with { type: "json" };
-import type { Api, KnownProvider, Model, ModelSpec, TokenCost, Usage } from "./types";
+import type { Api, KnownProvider, Model, TokenCost, Usage } from "./types";
 
 /**
  * Static bundled model registry loaded from `models.json`.
@@ -12,7 +11,7 @@ import type { Api, KnownProvider, Model, ModelSpec, TokenCost, Usage } from "./t
  */
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
-/** Build (once) and return one provider's enriched bundled models. */
+/** Return one provider's bundled models, materialized by the generator. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
@@ -20,8 +19,10 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 
 	const providerModels = new Map<string, Model<Api>>();
 	const rawModels = MODELS[provider as keyof typeof MODELS];
-	for (const [id, model] of Object.entries(rawModels)) {
-		providerModels.set(id, buildModel(model as ModelSpec<Api>));
+	for (const id in rawModels) {
+		// models.json rows are complete Models emitted by generate-models.ts;
+		// consuming them verbatim keeps startup allocation-free.
+		providerModels.set(id, rawModels[id as keyof typeof rawModels] as unknown as Model<Api>);
 	}
 	modelRegistry.set(provider, providerModels);
 	return providerModels;

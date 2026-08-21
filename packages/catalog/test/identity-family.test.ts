@@ -12,12 +12,15 @@ import {
 	isKimiModelId,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
+	isMuseSparkModelId,
 	isOpenAIGptOssModelId,
 	isOpenAIModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isReasoningGlmModelId,
 	modelFamilyToken,
 	parseAnthropicModel,
 	supportsAdaptiveThinkingDisplay,
+	supportsHashlineEdits,
 	supportsMidConversationSystemMessages,
 } from "@oh-my-pi/pi-catalog/identity";
 
@@ -27,6 +30,41 @@ describe("isKimiModelId", () => {
 		expect(isKimiModelId("kimi-k2.6")).toBe(true);
 		expect(isKimiModelId("vendor/kimi.x")).toBe(true);
 		expect(isKimiModelId("akimbo-model")).toBe(false);
+	});
+});
+
+describe("supportsHashlineEdits", () => {
+	test("declines the families that miscount line anchors", () => {
+		expect(supportsHashlineEdits("openrouter/moonshotai/Kimi-K2-Instruct")).toBe(false);
+		expect(supportsHashlineEdits("xiaomi/MiMo-V2.5-Pro")).toBe(false);
+		expect(supportsHashlineEdits("tensormesh/deepseek-ai/DeepSeek-V4-Flash")).toBe(false);
+		expect(supportsHashlineEdits("kilo/stepfun/step-3.7-flash:free")).toBe(false);
+	});
+	test("vouches for structured-edit-capable models", () => {
+		expect(supportsHashlineEdits("google/gemini-3.5-flash")).toBe(true);
+		expect(supportsHashlineEdits("claude-fable-5")).toBe(true);
+		expect(supportsHashlineEdits("moonshot/moonshot-v1-128k")).toBe(true);
+	});
+});
+
+describe("isQwen38PlusTemplateEffortModelId", () => {
+	test("matches Qwen 3.8+ open-weight ids across id shapes and versions", () => {
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-27b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-2.4t-a95b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen/qwen3.8-27b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("Qwen3.8-27B-UD-Q6_K_XL")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-27b:thinking")).toBe(true);
+		// Component-wise version compare: 3.10 sorts after 3.8.
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.10-27b")).toBe(true);
+	});
+	test("rejects pre-3.8 versions, parameter-count lookalikes, and API-only Max SKUs", () => {
+		expect(isQwen38PlusTemplateEffortModelId("qwen3-8b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen-3.6-27b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.7-plus")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen2.5-coder-7b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen-3.8b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-max")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-max-preview")).toBe(false);
 	});
 });
 
@@ -195,6 +233,22 @@ describe("isMinimaxM3FamilyModelId", () => {
 	});
 });
 
+describe("isMuseSparkModelId", () => {
+	test("matches Muse Spark ids across namespaces and contributor SKUs", () => {
+		expect(isMuseSparkModelId("muse-spark-1.1")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2-contributor")).toBe(true);
+		expect(isMuseSparkModelId("meta/muse-spark-1.2")).toBe(true);
+	});
+
+	test("rejects adjacent spark or muse names", () => {
+		expect(isMuseSparkModelId("spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("muse-1.2")).toBe(false);
+		expect(isMuseSparkModelId("amuse-spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("gpt-5.3-codex-spark")).toBe(false);
+	});
+});
+
 describe("isOpenAIGptOssModelId", () => {
 	test("matches gpt-oss across catalog id shapes", () => {
 		expect(isOpenAIGptOssModelId("gpt-oss-120b")).toBe(true);
@@ -342,6 +396,7 @@ describe("isGrokReasoningEffortCapable", () => {
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.3")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.5")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.6")).toBe(true);
+		expect(isGrokReasoningEffortCapable("grok-4.6")).toBe(true);
 		expect(isGrokReasoningEffortCapable("openrouter/xai/grok-3-mini")).toBe(true);
 	});
 

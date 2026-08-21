@@ -8,11 +8,14 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	onAppendOnlyModeChanged,
+	onCodeModeChanged,
+	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
@@ -385,6 +388,157 @@ describe("Settings", () => {
 				).toBe(true);
 			} finally {
 				process.removeListener("unhandledRejection", onUnhandled);
+			}
+		});
+	});
+
+	describe("live persisted reload", () => {
+		it("rejects malformed live configs without moving them aside or replacing effective settings", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await writeSettings({
+				setupVersion: 1,
+				modelRoles: { global_role: "openai/global" },
+			});
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ modelRoles: { project_role: "openai/project" } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const malformedGlobal = 'setupVersion: 2\nmodelRoles:\n  global_role: "unterminated\n';
+			const malformedProject = 'modelRoles:\n  project_role: "unterminated\n';
+			await Promise.all([
+				Bun.write(getConfigPath(), malformedGlobal),
+				Bun.write(projectConfigPath, malformedProject),
+			]);
+
+			await expect(settings.reloadFromDisk()).rejects.toThrow("Settings config is invalid");
+
+			expect(await Bun.file(getConfigPath()).text()).toBe(malformedGlobal);
+			expect(await Bun.file(projectConfigPath).text()).toBe(malformedProject);
+			expect(fs.readdirSync(agentDir).some(name => name.startsWith("config.yml.broken-"))).toBe(false);
+			expect(
+				fs.readdirSync(path.dirname(projectConfigPath)).some(name => name.startsWith("config.yml.broken-")),
+			).toBe(false);
+			expect(settings.get("setupVersion")).toBe(1);
+			expect(settings.getModelRole("global_role")).toBe("openai/global");
+			expect(settings.getModelRole("project_role")).toBe("openai/project");
+		});
+		it("retries when a persisted setting changes while files are being read", async () => {
+			await writeSettings({ setupVersion: 1 });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const loadCapability = discovery.loadCapability;
+			const projectLoadStarted = Promise.withResolvers<void>();
+			const releaseProjectLoad = Promise.withResolvers<void>();
+			let pauseProjectLoad = true;
+			vi.spyOn(discovery, "loadCapability").mockImplementation(async (id, options) => {
+				if (pauseProjectLoad) {
+					pauseProjectLoad = false;
+					projectLoadStarted.resolve();
+					await releaseProjectLoad.promise;
+				}
+				return await loadCapability(id, options);
+			});
+
+			const reload = settings.reloadFromDisk();
+			await projectLoadStarted.promise;
+			settings.set("setupVersion", 2);
+			releaseProjectLoad.resolve();
+			await reload;
+			await settings.flush();
+
+			expect(settings.get("setupVersion")).toBe(2);
+			expect((await readSettings()).setupVersion).toBe(2);
+		});
+
+		it("preserves runtime overrides and only signals semantic model-role changes", async () => {
+			await writeSettings({ modelRoles: { default: "openai/original" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.overrideModelRoles({ runtime: "openai/runtime" });
+			let signalCount = 0;
+			const unsubscribe = onModelRolesChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				expect(signalCount).toBe(0);
+				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+
+				await writeSettings({ modelRoles: { default: "openai/updated" } });
+				await settings.reloadFromDisk();
+
+				expect(signalCount).toBe(1);
+				expect(settings.getModelRole("default")).toBe("openai/updated");
+				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs picked up from disk", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				expect(signalCount).toBe(0);
+
+				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
+				await settings.reloadFromDisk();
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+
+				// A single reload that changes several partition inputs signals once.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("eval.js")).toBe(false);
+				expect(settings.get("providers.openai-codex.codeModeDirectTools")).toEqual(["bash"]);
+				expect(signalCount).toBe(2);
+
+				// `edit.mode` renames the direct edit tool on the wire.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("edit.mode")).toBe("apply_patch");
+				expect(signalCount).toBe(3);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs supplied by the destination project", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherProject = tempDir.join("code-mode-project");
+			await Bun.write(
+				path.join(getProjectAgentDir(otherProject), "config.yml"),
+				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
+			);
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadForCwd(otherProject);
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+			} finally {
+				unsubscribe();
 			}
 		});
 	});
@@ -865,6 +1019,25 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("compaction method migration", () => {
+		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
+			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
+				"remote",
+				"snapcompact",
+				"handoff",
+				"shake",
+				"soft",
+			]);
+		});
+
+		it("migrates a local-only legacy strategy to soft compaction", async () => {
+			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.methodOrder")).toEqual(["soft"]);
+		});
+	});
 	describe("migrations", () => {
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
 			await writeSettings({

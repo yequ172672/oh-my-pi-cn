@@ -291,6 +291,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 **Rules:**
 
 - New entries always go under `## [Unreleased]`.
+- Entries are one line, brief, and user-facing: lead with what the user will see or can now do. Root-cause narration and implementation detail belong in the commit/PR, not the changelog.
 - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
 
@@ -308,6 +309,8 @@ Location: `packages/*/CHANGELOG.md` (per package).
 - The published `omp-cn` manifest carries validated `ompFork` metadata. Update logic must install `omp-cn@forkVersion` and `@oh-my-pi/pi-natives@nativeVersion` independently; packages without metadata are legacy and use their historical same-version/tag behavior.
 - Runtime and release tooling share the strict, side-effect-free parser in `src/distribution-schema.ts`; do not add a second SemVer/SHA/schema parser or compatibility-only field aliases.
 - Local package tooling is validation-only (`--dry-run` or `--pack`) and cannot publish npm. Tag CI alone may publish the same verified tgz after isolated `--version`, `--help`, and `--smoke-test` checks. The temporary package manifest must be restored even on failure.
+- Fork packaging must stage `LICENSE` and `THIRD-PARTY-NOTICES.txt`, include both in the npm tarball and GitHub Release checksum set, then restore or remove staged working-tree files even when packing fails.
+- Ordinary fork CI may build Linux validation addons from the exact checkout SHA while the matching upstream native npm packages are not yet published; release-tag CI must never use that fallback and requires every exact native core/leaf version from npm.
 - The legacy `omp-cn@17.2.11` updater requires a one-time bridge release where `forkVersion === nativeVersion`, unless maintainers explicitly approve and document a manual global-install migration.
 - Operational gates, failure recovery, installer behavior, and release authorization are defined in `docs/MAINTENANCE.md`.
 

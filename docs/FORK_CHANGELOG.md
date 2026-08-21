@@ -4,9 +4,15 @@
 
 ## [Unreleased]
 
+### 变更
+
+- 跟进上游 17.4.1 的许可证载荷合同，`omp-cn` tarball 与 GitHub Release 均包含 `LICENSE`、`THIRD-PARTY-NOTICES.txt` 及完整校验和。
+
 ### 修复
 
 - 修复 Windows 二进制安装器在替换现有 `omp.exe` 时因空备份路径失败的问题。
+- 修复同步上游 17.4.1 后，Composer 升级向导、新设置项和新增命令流程回退为英文的问题。
+- 修复 Windows 本地运行更新器合同测试时，用 POSIX npm 目录布局配合宿主平台解析而产生的错误失败。
 
 ## [17.3.5] - 2026-08-17
 

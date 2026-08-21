@@ -11,7 +11,7 @@ import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
 import * as git from "../../utils/git";
-import { abortOnGitFailure, pushOrAbort } from "../execute";
+import { abortOnGitFailure, CommitAbortedError, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
@@ -303,7 +303,20 @@ async function runSplitCommit(
 	}
 
 	process.stdout.write("● Creating split commits...\n");
-	const stagedDiff = await git.diff(ctx.cwd, { cached: true, binary: true });
+	let stagedDiff: string;
+	try {
+		stagedDiff = await git.diff(ctx.cwd, { cached: true, binary: true, requireComplete: true });
+	} catch (error) {
+		if (error instanceof git.GitOutputTruncatedError) {
+			process.stderr.write(
+				`✗ Cannot create split commits: ${error.message}\n` +
+					"  A large or binary file makes the staged diff too big to slice safely.\n" +
+					"  Commit the large file(s) on their own, then re-run for the rest.\n",
+			);
+			throw new CommitAbortedError();
+		}
+		throw error;
+	}
 	await git.stage.reset(ctx.cwd);
 	for (const [position, commitIndex] of order.entries()) {
 		const commit = plan.commits[commitIndex];

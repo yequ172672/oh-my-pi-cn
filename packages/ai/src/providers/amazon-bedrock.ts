@@ -342,7 +342,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				if (tc.any || tc.tool) additionalModelRequestFields = undefined;
 			}
 
-			const commandInput: ConverseStreamRequest = {
+			let commandInput: ConverseStreamRequest = {
 				messages: convertedMessages,
 				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
 				inferenceConfig: {
@@ -353,7 +353,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				toolConfig,
 				additionalModelRequestFields,
 			};
-			options?.onPayload?.(commandInput, model);
+			const replacementInput = await options?.onPayload?.(commandInput, model);
+			if (replacementInput !== undefined) commandInput = replacementInput as ConverseStreamRequest;
 
 			const host = `bedrock-runtime.${region}.amazonaws.com`;
 			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
@@ -778,17 +779,6 @@ function takeCachePoint(policy: BedrockPromptCachePolicy): CachePoint | undefine
 	return { cachePoint: { type: "default", ...(policy.ttl ? { ttl: policy.ttl } : {}) } };
 }
 
-/**
- * Check if the model supports thinking signatures in reasoningContent.
- * Only Anthropic Claude models support the signature field.
- * Other models (Nova, Titan, Mistral, Llama, etc.) reject it with:
- * "This model doesn't support the reasoningContent.reasoningText.signature field"
- */
-function supportsThinkingSignature(model: Model<"bedrock-converse-stream">): boolean {
-	const id = model.id.toLowerCase();
-	return id.includes("anthropic.claude") || id.includes("anthropic/claude");
-}
-
 function buildSystemPrompt(
 	systemPrompt: readonly string[] | string | undefined,
 	promptCachePolicy: BedrockPromptCachePolicy,
@@ -868,21 +858,25 @@ function convertMessages(
 						case "thinking":
 							// Skip empty thinking blocks
 							if (c.thinking.trim().length === 0) continue;
-							// A captured signature is authoritative even when the model id is an opaque ARN.
-							// Without one, known non-Claude families use unsigned reasoning; known Claude ids demote to text.
+							// A captured signature is authoritative even when the model id is an opaque ARN:
+							// only a model that itself streamed a signature (Claude) can have one, so replay
+							// it as signed reasoningContent regardless of how the id is spelled.
 							if (c.thinkingSignature) {
 								contentBlocks.push({
 									reasoningContent: {
 										reasoningText: { text: c.thinking.toWellFormed(), signature: c.thinkingSignature },
 									},
 								});
-							} else if (!supportsThinkingSignature(model)) {
-								// Model doesn't support signatures at all — send as unsigned reasoning
-								contentBlocks.push({
-									reasoningContent: { reasoningText: { text: c.thinking.toWellFormed() } },
-								});
 							} else {
-								// Model requires signature but we don't have one — demote to text
+								// No signature was captured. Do NOT fall back to unsigned reasoningContent here:
+								// a model streaming reasoningContent does not imply it accepts reasoningContent
+								// echoed back in a request. Amazon Nova streams unsigned reasoning just fine but
+								// rejects it on replay with HTTP 400 "User messages cannot contain reasoning
+								// content. Please remove the reasoning content and try again.", which wedges the
+								// agent loop on every turn after the first. Demote to plain text instead — the
+								// content survives, just no longer typed as a reasoning block. This matches how
+								// every other provider (Anthropic, Google, OpenAI-completions) handles thinking
+								// blocks it can't safely replay.
 								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;

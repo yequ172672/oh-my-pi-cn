@@ -1,12 +1,18 @@
 /// <reference path="./legacy-pi-virtual-modules.d.ts" />
 
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
 import { parse as parseBabel } from "@babel/parser";
-import { isCompiledBinary, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import {
+	getLegacyPiExtensionCacheDbPath,
+	isCompiledBinary,
+	logger,
+	stripWindowsExtendedLengthPathPrefix,
+} from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 
 const IS_COMPILED_BINARY = isCompiledBinary();
@@ -537,6 +543,159 @@ function collectExtensionSpecifierReferences(
 	return references;
 }
 
+const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 1;
+const EXTENSION_PARSE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const EXTENSION_PARSE_CACHE_MAX_ENTRIES = 10_000;
+
+interface ExtensionSourceAnalysis {
+	readonly sourceType: "script" | "module";
+	readonly references: readonly ExtensionSpecifierReference[];
+	readonly commonJsNamedExports: readonly string[];
+	readonly commonJsReexportSpecifiers: readonly string[];
+}
+
+interface ExtensionParseCacheRow {
+	source_type: "script" | "module";
+	references: string;
+	commonjs_named_exports: string;
+	commonjs_reexport_specifiers: string;
+}
+
+let extensionParseCacheDb: Database | null | undefined;
+const extensionSourceAnalysisCache = new Map<string, ExtensionSourceAnalysis>();
+
+function extensionParseCacheKey(source: string, importerPath: string): string {
+	return `${EXTENSION_PARSE_CACHE_SCHEMA_VERSION}:${path.extname(importerPath).toLowerCase()}:${Bun.hash(source).toString(16)}`;
+}
+
+function getExtensionParseCacheDb(): Database | null {
+	if (extensionParseCacheDb !== undefined) return extensionParseCacheDb;
+	try {
+		const cachePath = getLegacyPiExtensionCacheDbPath();
+		try {
+			if (fs.statSync(cachePath).size > EXTENSION_PARSE_CACHE_MAX_BYTES) {
+				fs.rmSync(cachePath, { force: true });
+			}
+		} catch {
+			// A missing or unreadable cache is a cold cache.
+		}
+		fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+		const db = new Database(cachePath, { create: true });
+		db.run("PRAGMA busy_timeout = 50");
+		db.run(
+			"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, references TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+		);
+		extensionParseCacheDb = db;
+		return db;
+	} catch (error) {
+		logger.debug("legacy Pi extension parse cache unavailable", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		extensionParseCacheDb = null;
+		return null;
+	}
+}
+
+function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalysis | null {
+	try {
+		if (row.source_type !== "script" && row.source_type !== "module") return null;
+		const references = JSON.parse(row.references) as unknown;
+		const commonJsNamedExports = JSON.parse(row.commonjs_named_exports) as unknown;
+		const commonJsReexportSpecifiers = JSON.parse(row.commonjs_reexport_specifiers) as unknown;
+		if (
+			!Array.isArray(references) ||
+			!references.every(
+				reference =>
+					reference &&
+					typeof reference === "object" &&
+					(reference.kind === "import" || reference.kind === "require") &&
+					typeof reference.specifier === "string" &&
+					typeof reference.start === "number" &&
+					typeof reference.end === "number",
+			) ||
+			!Array.isArray(commonJsNamedExports) ||
+			!commonJsNamedExports.every(name => typeof name === "string") ||
+			!Array.isArray(commonJsReexportSpecifiers) ||
+			!commonJsReexportSpecifiers.every(specifier => typeof specifier === "string")
+		) {
+			return null;
+		}
+		return {
+			sourceType: row.source_type,
+			references: references as ExtensionSpecifierReference[],
+			commonJsNamedExports,
+			commonJsReexportSpecifiers,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourceAnalysis): void {
+	void Promise.resolve()
+		.then(() => {
+			const db = getExtensionParseCacheDb();
+			if (!db) return;
+			db.run(
+				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, references, commonjs_named_exports, commonjs_reexport_specifiers) VALUES (?, ?, ?, ?, ?)",
+				[
+					cacheKey,
+					analysis.sourceType,
+					JSON.stringify(analysis.references),
+					JSON.stringify(analysis.commonJsNamedExports),
+					JSON.stringify(analysis.commonJsReexportSpecifiers),
+				],
+			);
+			const count =
+				db.query<{ count: number }, []>("SELECT count(*) AS count FROM extension_parse_cache").get()?.count ?? 0;
+			if (count > EXTENSION_PARSE_CACHE_MAX_ENTRIES) {
+				db.run("DELETE FROM extension_parse_cache");
+			}
+		})
+		.catch(error => {
+			logger.debug("legacy Pi extension parse cache write failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+}
+
+function getExtensionSourceAnalysis(source: string, importerPath: string): ExtensionSourceAnalysis {
+	const cacheKey = extensionParseCacheKey(source, importerPath);
+	const memoryCached = extensionSourceAnalysisCache.get(cacheKey);
+	if (memoryCached) return memoryCached;
+
+	const db = getExtensionParseCacheDb();
+	try {
+		const row = db
+			?.query<ExtensionParseCacheRow, [string]>(
+				"SELECT source_type, references, commonjs_named_exports, commonjs_reexport_specifiers FROM extension_parse_cache WHERE cache_key = ?",
+			)
+			.get(cacheKey);
+		if (row) {
+			const cached = parseCachedAnalysis(row);
+			if (cached) {
+				extensionSourceAnalysisCache.set(cacheKey, cached);
+				return cached;
+			}
+		}
+	} catch (error) {
+		logger.debug("legacy Pi extension parse cache read failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+
+	const ast = parseExtensionSource(source, importerPath);
+	const commonJs = collectCommonJsExportAnalysis(ast);
+	const analysis: ExtensionSourceAnalysis = {
+		sourceType: ast.program.sourceType,
+		references: collectExtensionSpecifierReferences(source, importerPath, ast),
+		...commonJs,
+	};
+	extensionSourceAnalysisCache.set(cacheKey, analysis);
+	writeExtensionSourceAnalysis(cacheKey, analysis);
+	return analysis;
+}
+
 function applySpecifierReplacements(
 	source: string,
 	replacements: ReadonlyArray<ExtensionSpecifierReference & { readonly replacement: string }>,
@@ -1003,7 +1162,7 @@ async function rewriteLegacyExtensionSource(
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
-	const references = collectExtensionSpecifierReferences(source, importerPath);
+	const references = getExtensionSourceAnalysis(source, importerPath).references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
 		if (reference.kind !== "import") continue;
@@ -1351,12 +1510,59 @@ async function findNodePackageRootUncached(packageName: string, importerPath: st
 		if (await pathExists(path.join(candidate, "package.json"))) {
 			return candidate;
 		}
+		const workspaceMember = await findWorkspaceMemberPackageRoot(dir, packageName);
+		if (workspaceMember) {
+			return workspaceMember;
+		}
 		const parent = path.dirname(dir);
 		if (parent === dir) {
 			return null;
 		}
 		dir = parent;
 	}
+}
+
+/**
+ * Resolve `packageName` as a workspace member when `dir` is a workspace root.
+ *
+ * An installed git dependency of a monorepo plugin contains the full
+ * workspace tree but no node_modules links: `bun install` materializes a git
+ * dependency's regular npm dependencies into the host tree and skips its
+ * `workspace:*` / `file:` edges. Bare imports between workspace siblings
+ * therefore never resolve through the node_modules walk above. When a
+ * directory on that walk declares `workspaces` (array form or the yarn-style
+ * `{ packages: [...] }` object), scan the member manifests for the requested
+ * package name. node_modules candidates at the same level win, so an
+ * explicitly installed copy still shadows the workspace member.
+ */
+async function findWorkspaceMemberPackageRoot(dir: string, packageName: string): Promise<string | null> {
+	if (!(await pathExists(path.join(dir, "package.json")))) {
+		return null;
+	}
+	const manifest = await readPackageManifest(dir);
+	const rawWorkspaces = manifest?.workspaces;
+	const patterns = Array.isArray(rawWorkspaces)
+		? rawWorkspaces
+		: isRecord(rawWorkspaces) && Array.isArray(rawWorkspaces.packages)
+			? rawWorkspaces.packages
+			: null;
+	if (!patterns) {
+		return null;
+	}
+	for (const pattern of patterns) {
+		if (typeof pattern !== "string" || pattern.startsWith("!")) {
+			continue;
+		}
+		const glob = new Bun.Glob(path.join(pattern, "package.json"));
+		for await (const match of glob.scan({ cwd: dir, onlyFiles: true })) {
+			const memberRoot = path.dirname(path.join(dir, match));
+			const memberManifest = await readPackageManifest(memberRoot);
+			if (memberManifest?.name === packageName) {
+				return memberRoot;
+			}
+		}
+	}
+	return null;
 }
 
 async function readPackageManifest(packageRoot: string): Promise<Record<string, unknown> | null> {
@@ -1401,7 +1607,7 @@ async function isCommonJsModulePath(
 		return true;
 	}
 	const parsedSourceType =
-		sourceType ?? parseExtensionSource(await Bun.file(modulePath).text(), modulePath).program.sourceType;
+		sourceType ?? getExtensionSourceAnalysis(await Bun.file(modulePath).text(), modulePath).sourceType;
 	if (parsedSourceType === "module") {
 		return false;
 	}
@@ -1729,7 +1935,7 @@ async function rewriteExtensionSpecifiers(
 	importerPath: string,
 	rewriteImports = false,
 ): Promise<string> {
-	const references = collectExtensionSpecifierReferences(source, importerPath);
+	const references = getExtensionSourceAnalysis(source, importerPath).references;
 	const resolvedSpecifierTargets = new Map<string, string>();
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -1761,7 +1967,7 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
 		return source;
 	}
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
-	for (const reference of collectExtensionSpecifierReferences(source, importerPath)) {
+	for (const reference of getExtensionSourceAnalysis(source, importerPath).references) {
 		const replacement = resolvedSpecifierTargets.get(`${reference.kind}\0${reference.specifier}`);
 		if (replacement) {
 			replacements.push({ ...reference, replacement });
@@ -1792,7 +1998,7 @@ async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<bo
 	} catch {
 		return false;
 	}
-	for (const reference of collectExtensionSpecifierReferences(source, modulePath)) {
+	for (const reference of getExtensionSourceAnalysis(source, modulePath).references) {
 		if (reference.kind === "require" && (await resolveExtensionNativeAddon(reference.specifier, modulePath))) {
 			return true;
 		}
@@ -1993,18 +2199,18 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 			continue;
 		}
 		modules.set(file, source);
-		const ast = parseExtensionSource(source, file);
+		const analysis = getExtensionSourceAnalysis(source, file);
 		const sourceIsCommonJs = await isGraphOwnedCommonJsModule(
 			file,
 			entryRealPath,
-			ast.program.sourceType,
+			analysis.sourceType,
 			inheritedModuleKind,
 		);
 		if (sourceIsCommonJs) {
 			commonJsPaths.add(file);
 		}
 		const dir = path.dirname(file);
-		const references = collectExtensionSpecifierReferences(source, file, ast);
+		const references = analysis.references;
 		for (const reference of references) {
 			const specifier = reference.specifier;
 			try {
@@ -2186,22 +2392,11 @@ export async function __collectLegacyPiExtensionSourcesForTests(
  */
 const COMMONJS_NAMED_EXPORT_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
-function collectCommonJsNamedExports(source: string, modulePath: string, visited = new Set<string>()): string[] {
-	let realModulePath = modulePath;
-	try {
-		realModulePath = fs.realpathSync(modulePath);
-	} catch {
-		// The caller's path remains the stable cycle key when realpath fails.
-	}
-	if (visited.has(realModulePath)) {
-		return [];
-	}
-	visited.add(realModulePath);
-
+function collectCommonJsExportAnalysis(
+	ast: ParseResult,
+): Pick<ExtensionSourceAnalysis, "commonJsNamedExports" | "commonJsReexportSpecifiers"> {
 	const names = new Set<string>();
-
 	const reexportSpecifiers = new Set<string>();
-	const ast = parseExtensionSource(source, modulePath);
 	for (const { node, scope } of collectScopedAstNodes(
 		ast,
 		candidate => candidate.type === "CallExpression" || candidate.type === "AssignmentExpression",
@@ -2237,17 +2432,13 @@ function collectCommonJsNamedExports(source: string, modulePath: string, visited
 		if (node.type !== "AssignmentExpression" || node.operator !== "=") continue;
 		const left = asAstNode(node.left);
 		if (left?.type !== "MemberExpression") continue;
-
 		const propertyName = staticMemberPropertyName(left);
 		const object = asAstNode(left.object);
 		if (propertyName !== null && isUnshadowedExportsTarget(object, scope)) {
-			if (propertyName !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(propertyName)) {
-				names.add(propertyName);
-			}
+			if (propertyName !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(propertyName)) names.add(propertyName);
 			continue;
 		}
 		if (!isUncomputedMember(left, "module", "exports") || scopeHasBinding(scope, MODULE_BINDING)) continue;
-
 		const right = asAstNode(node.right);
 		if (right?.type === "ObjectExpression") {
 			const properties = nodeArray(right, "properties");
@@ -2256,28 +2447,37 @@ function collectCommonJsNamedExports(source: string, modulePath: string, visited
 					const property = asAstNode(value);
 					if (!property || (property.type !== "ObjectProperty" && property.type !== "ObjectMethod")) continue;
 					const name = staticObjectPropertyName(property);
-					if (name && name !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(name)) {
-						names.add(name);
-					}
+					if (name && name !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(name)) names.add(name);
 				}
 			}
 			continue;
 		}
 		if (isGlobalRequireCall(right, scope)) {
 			const argument = nodeArgument(right, 0);
-			if (argument?.type === "StringLiteral" && typeof argument.value === "string") {
+			if (argument?.type === "StringLiteral" && typeof argument.value === "string")
 				reexportSpecifiers.add(argument.value);
-			}
 		}
 	}
+	return { commonJsNamedExports: [...names], commonJsReexportSpecifiers: [...reexportSpecifiers] };
+}
+
+function collectCommonJsNamedExports(source: string, modulePath: string, visited = new Set<string>()): string[] {
+	let realModulePath = modulePath;
+	try {
+		realModulePath = fs.realpathSync(modulePath);
+	} catch {
+		// The caller's path remains the stable cycle key when realpath fails.
+	}
+	if (visited.has(realModulePath)) return [];
+	visited.add(realModulePath);
+	const analysis = getExtensionSourceAnalysis(source, modulePath);
+	const names = new Set(analysis.commonJsNamedExports);
 	const nativeRequire = createRequire(modulePath);
-	for (const specifier of reexportSpecifiers) {
+	for (const specifier of analysis.commonJsReexportSpecifiers) {
 		try {
 			const resolved = fs.realpathSync(nativeRequire.resolve(specifier));
 			const reexportedSource = rewriteExtensionSpecifiersFromCache(fs.readFileSync(resolved, "utf8"), resolved);
-			for (const name of collectCommonJsNamedExports(reexportedSource, resolved, visited)) {
-				names.add(name);
-			}
+			for (const name of collectCommonJsNamedExports(reexportedSource, resolved, visited)) names.add(name);
 		} catch {
 			// Native modules and non-source re-exports do not expose analyzable names.
 		}

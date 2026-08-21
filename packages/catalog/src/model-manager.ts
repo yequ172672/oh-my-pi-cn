@@ -42,11 +42,11 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
-	 * Trusted, provider-wide request headers (compile-time constants, never
-	 * credentials) that the cache may restore by value for any model whose live
-	 * headers matched them at write time. Lets header-bearing dynamic models
-	 * without a bundled static entry survive offline reads instead of being
-	 * dropped as unrestorable (e.g. GitHub Copilot's User-Agent + API version).
+	 * Trusted, provider-wide request headers that can be safely re-derived at
+	 * cache-read time. The cache never persists their values. Models whose live
+	 * headers matched this record at write time can survive offline reads without
+	 * a bundled static source, including configured discovery providers whose
+	 * bearer header comes from the current local config.
 	 */
 	restorableHeaderFallback?: Record<string, string>;
 	/** Optional dynamic endpoint fetcher. */

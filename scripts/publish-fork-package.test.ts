@@ -17,6 +17,7 @@ import {
 	parseForkReleaseMetadata,
 	sha256File,
 	withRestoredFile,
+	withRestoredFiles,
 } from "./publish-fork-package";
 
 const metadata: ForkReleaseMetadata = {
@@ -66,6 +67,7 @@ describe("fork npm package manifest", () => {
 			chalk: "5.0.0",
 		});
 		expect(manifest.ompFork).toEqual({ ...metadata, releaseTag: `omp-cn-v${metadata.forkVersion}` });
+		expect(manifest.files).toEqual(expect.arrayContaining(["LICENSE", "THIRD-PARTY-NOTICES.txt"]));
 	});
 
 	it("rejects malformed versions and upstream commit identities", () => {
@@ -119,6 +121,26 @@ describe("fork npm package manifest", () => {
 		expect(new Uint8Array(await Bun.file(manifest).arrayBuffer())).toEqual(original);
 	});
 
+	it("restores existing legal payloads and removes temporary staged files after failure", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cn-legal-restore-test-"));
+		tempDirs.push(root);
+		const license = path.join(root, "LICENSE");
+		const notices = path.join(root, "THIRD-PARTY-NOTICES.txt");
+		const originalLicense = new Uint8Array([0, 1, 255]);
+		await Bun.write(license, originalLicense);
+
+		await expect(
+			withRestoredFiles([license, notices], async () => {
+				await Bun.write(license, "temporary license");
+				await Bun.write(notices, "temporary notices");
+				throw new Error("simulated staging failure");
+			}),
+		).rejects.toThrow("simulated staging failure");
+
+		expect(new Uint8Array(await Bun.file(license).arrayBuffer())).toEqual(originalLicense);
+		expect(await Bun.file(notices).exists()).toBe(false);
+	});
+
 	it("validates the actual manifest and bundle entry inside a tgz", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cn-tar-test-"));
 		tempDirs.push(root);
@@ -135,6 +157,8 @@ describe("fork npm package manifest", () => {
 		await Bun.write(path.join(packageRoot, "package.json"), JSON.stringify(manifest));
 		await Bun.write(path.join(packageRoot, "fork-release.json"), JSON.stringify(metadata));
 		await Bun.write(path.join(packageRoot, "dist", "cli.js"), "#!/usr/bin/env bun\n");
+		await Bun.write(path.join(packageRoot, "LICENSE"), "MIT\n");
+		await Bun.write(path.join(packageRoot, "THIRD-PARTY-NOTICES.txt"), "notices\n");
 		const tarball = path.join(root, "omp-cn.tgz");
 		await $`tar -czf ${tarball} package`.cwd(root).quiet();
 

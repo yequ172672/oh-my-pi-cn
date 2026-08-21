@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
+import { t } from "../i18n";
 import * as git from "../utils/git";
 import { CLEANSE_PARSER_KINDS, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
@@ -68,6 +69,12 @@ export interface CleanseCheckerDescriptor {
 	command: string;
 }
 
+/** Lifecycle notifications for one {@link CleanseDiagnosticSuite.run} pass, used by the CLI status board. */
+export interface CleanseCheckerRunEvents {
+	onCheckerStart?(checker: CleanseCheckerDescriptor): void;
+	onCheckerEnd?(check: CleanseCheckResult, durationMs: number): void;
+}
+
 /** Re-runnable checker set discovered from one project snapshot. */
 export interface CleanseDiagnosticSuite {
 	/** Every discovered checker; unaffected by {@link CleanseDiagnosticSuite.select}. */
@@ -75,7 +82,7 @@ export interface CleanseDiagnosticSuite {
 	readonly skipped: readonly SkippedCleanseCheck[];
 	/** Narrow subsequent {@link CleanseDiagnosticSuite.run} calls to the named checker ids. */
 	select(ids: readonly string[]): void;
-	run(signal?: AbortSignal): Promise<CleanseDiagnosticReport>;
+	run(signal?: AbortSignal, events?: CleanseCheckerRunEvents): Promise<CleanseDiagnosticReport>;
 }
 
 /** Discover configured language checkers without installing missing tools. */
@@ -128,14 +135,24 @@ function createSuite(
 			const wanted = new Set(ids);
 			active = plans.filter(plan => wanted.has(plan.id));
 		},
-		async run(signal?: AbortSignal): Promise<CleanseDiagnosticReport> {
+		async run(signal?: AbortSignal, events?: CleanseCheckerRunEvents): Promise<CleanseDiagnosticReport> {
+			const execute = async (plan: CheckerPlan): Promise<CleanseCheckResult> => {
+				events?.onCheckerStart?.({
+					id: plan.id,
+					label: plan.label,
+					language: plan.language,
+					command: plan.command,
+				});
+				const startedAt = Date.now();
+				const check = await runChecker(plan, projectCwd, allowedFiles, signal);
+				events?.onCheckerEnd?.(check, Date.now() - startedAt);
+				return check;
+			};
 			const mutatingChecks: CleanseCheckResult[] = [];
 			for (const plan of active) {
-				if (plan.mutates) mutatingChecks.push(await runChecker(plan, projectCwd, allowedFiles, signal));
+				if (plan.mutates) mutatingChecks.push(await execute(plan));
 			}
-			const parallelChecks = await Promise.all(
-				active.filter(plan => !plan.mutates).map(plan => runChecker(plan, projectCwd, allowedFiles, signal)),
-			);
+			const parallelChecks = await Promise.all(active.filter(plan => !plan.mutates).map(execute));
 			const checks = [...mutatingChecks, ...parallelChecks];
 			return {
 				checks,
@@ -170,12 +187,12 @@ export async function buildCustomCleanseSuite(
 		const label = spec.label.trim() || `custom checker ${index + 1}`;
 		const language = spec.language?.trim() || "Custom";
 		if (!binary) {
-			skipped.push({ label, language, reason: "empty command" });
+			skipped.push({ label, language, reason: t("cleanse.skip.emptyCommand") });
 			continue;
 		}
 		const root = normalizeCustomRoot(resolvedCwd, spec.cwd);
 		if (root === undefined) {
-			skipped.push({ label, language, reason: `working directory escapes the project: ${spec.cwd}` });
+			skipped.push({ label, language, reason: t("cleanse.skip.cwdEscapesProject", { cwd: spec.cwd }) });
 			continue;
 		}
 		let executable: string | undefined;
@@ -186,7 +203,7 @@ export async function buildCustomCleanseSuite(
 			executable = resolveBinary(resolvedCwd, root, [binary]);
 		}
 		if (!executable) {
-			skipped.push({ label, language, reason: `executable not found: ${binary}` });
+			skipped.push({ label, language, reason: t("cleanse.skip.executableNotFound", { executable: binary }) });
 			continue;
 		}
 		plans.push({
@@ -313,7 +330,9 @@ function addPlan(state: DiscoveryState, request: PlanRequest): void {
 		state.skipped.push({
 			label: `${request.label} (${rootLabel})`,
 			language: request.language,
-			reason: `executable not found: ${request.binaries.join(" or ")}`,
+			reason: t("cleanse.skip.executableNotFound", {
+				executable: request.binaries.join(t("cleanse.skip.executableOr")),
+			}),
 		});
 		return;
 	}
@@ -357,7 +376,9 @@ async function discoverRust(state: DiscoveryState): Promise<void> {
 			state.skipped.push({
 				label: `cargo clippy (${root})`,
 				language: "Rust",
-				reason: `cargo metadata failed: ${error instanceof Error ? error.message : String(error)}`,
+				reason: t("cleanse.skip.cargoMetadataFailed", {
+					reason: error instanceof Error ? error.message : String(error),
+				}),
 			});
 			continue;
 		}
@@ -365,7 +386,7 @@ async function discoverRust(state: DiscoveryState): Promise<void> {
 			state.skipped.push({
 				label: `cargo clippy (${root})`,
 				language: "Rust",
-				reason: "no first-party workspace packages found",
+				reason: t("cleanse.skip.noFirstPartyPackages"),
 			});
 			continue;
 		}
@@ -431,9 +452,11 @@ async function cargoWorkspacePackages(state: DiscoveryState, root: string, cargo
 	try {
 		parsed = JSON.parse(result.stdout);
 	} catch (error) {
-		throw new Error(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(
+			t("cleanse.skip.invalidJson", { reason: error instanceof Error ? error.message : String(error) }),
+		);
 	}
-	if (!isRecord(parsed)) throw new Error("metadata root is not an object");
+	if (!isRecord(parsed)) throw new Error(t("cleanse.skip.metadataRootInvalid"));
 	const workspaceMembers = new Set<string>();
 	if (Array.isArray(parsed.workspace_members)) {
 		for (const member of parsed.workspace_members) {

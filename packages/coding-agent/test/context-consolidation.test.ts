@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { estimateTokens } from "@oh-my-pi/pi-agent-core/compaction/compaction";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -85,7 +84,7 @@ describe("Context usage consolidation", () => {
 			settings: Settings.isolated({
 				"compaction.enabled": true,
 				"compaction.autoContinue": false,
-				"compaction.strategy": "context-full",
+				"compaction.methodOrder": ["soft"],
 				"compaction.thresholdTokens": 8000,
 			}),
 			modelRegistry,
@@ -301,7 +300,7 @@ describe("Context usage consolidation", () => {
 		const breakdown = session.getContextBreakdown();
 		expect(breakdown?.anchored).toBe(true);
 
-		const customEstimate = estimateTokens(customMsg);
+		const customEstimate = agent.tokenizer.countMessage(customMsg);
 		expect(breakdown?.usedTokens).toBe(150 + customEstimate);
 
 		await tempDir.remove();

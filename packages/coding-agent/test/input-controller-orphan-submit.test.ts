@@ -331,6 +331,13 @@ describe("InputController orphaned submit", () => {
 					images: undefined,
 				});
 				expect(titleSpy).toHaveBeenCalledWith(forwardedText);
+				// Drain the title request's .then/.finally chain so the in-flight
+				// latch clears before the next submit; a request still in flight is
+				// deliberately deduped (see agent-session-title-generation-dispose).
+				// The chain exposes no settlement promise; sleep(0) is a macrotask
+				// boundary that deterministically drains all pending microtasks —
+				// not a wall-clock wait, so fake timers would not help here.
+				await Bun.sleep(0);
 			}
 		} finally {
 			vi.restoreAllMocks();

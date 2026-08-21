@@ -14,7 +14,7 @@ import {
 	Text,
 	type TUI,
 } from "@oh-my-pi/pi-tui";
-import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -73,6 +73,21 @@ function isTodoToolDetails(details: unknown): details is TodoToolDetails {
 	);
 }
 
+interface ToolImageBlock {
+	data?: string;
+	mimeType?: string;
+}
+
+function imageBlocksFromDetails(details: unknown): ToolImageBlock[] {
+	if (!isRecord(details) || !Array.isArray(details.images)) return [];
+	return details.images.filter(
+		(image): image is ToolImageBlock =>
+			isRecord(image) &&
+			(image.data === undefined || typeof image.data === "string") &&
+			(image.mimeType === undefined || typeof image.mimeType === "string"),
+	);
+}
+
 function displaceableToolName(
 	toolName: string,
 	result: { details?: unknown; isError?: boolean },
@@ -82,6 +97,10 @@ function displaceableToolName(
 	if (toolName === "hub" && isWaitingPollDetails(result.details)) return "hub";
 	if (toolName === "todo" && !isPartial && isTodoToolDetails(result.details)) return "todo";
 	return undefined;
+}
+
+function isHubWaitArgs(args: unknown): boolean {
+	return isRecord(args) && args.op === "wait";
 }
 
 function stabilizeStreamingPreviews(previews: PerFileDiffPreview[]): PerFileDiffPreview[] {
@@ -269,6 +288,52 @@ export function sharedSpinnerFrame(frameCount: number, now: number = performance
 	return frameCount > 0 ? Math.floor(now / SPINNER_GLYPH_ADVANCE_MS) % frameCount : 0;
 }
 
+/** Live tool blocks currently driving a spinner. A single shared ticker (below)
+ * advances and repaints every registered block per glyph step, so N concurrent
+ * live/streaming blocks — e.g. parallel `task` subagents — cost one 80ms timer
+ * and one coalesced render frame per tick instead of N unsynchronized timers
+ * each independently waking the render scheduler (issue #8731). */
+const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
+let sharedSpinnerTimer: NodeJS.Timeout | undefined;
+
+/** Arm the shared spinner ticker if it is not already running. */
+function ensureSharedSpinnerTicker(): void {
+	if (sharedSpinnerTimer) return;
+	sharedSpinnerTimer = setInterval(() => {
+		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
+		// Deleting the current block mid-iteration (freeze path) is safe on a Set.
+		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
+	}, SPINNER_RENDER_INTERVAL_MS);
+}
+
+/** Register a live block with the shared ticker, starting it on first use. */
+function registerSpinnerBlock(block: ToolExecutionComponent): void {
+	liveSpinnerBlocks.add(block);
+	ensureSharedSpinnerTicker();
+}
+
+/** Drop a block; stop the ticker once no live block remains. */
+function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
+	if (!liveSpinnerBlocks.delete(block)) return;
+	if (liveSpinnerBlocks.size === 0 && sharedSpinnerTimer) {
+		clearInterval(sharedSpinnerTimer);
+		sharedSpinnerTimer = undefined;
+	}
+}
+
+/** Stop the shared spinner ticker and drop every registered live block.
+ *  Called on interactive-mode teardown so a stray live block cannot keep the
+ *  process-wide 80ms interval alive past shutdown (lingering event-loop
+ *  handles pin the process; cf. `postmortem.quit`). Test files that assert on
+ *  ticker arming also use this to start from a clean slate. */
+export function stopSharedSpinnerTicker(): void {
+	liveSpinnerBlocks.clear();
+	if (sharedSpinnerTimer) {
+		clearInterval(sharedSpinnerTimer);
+		sharedSpinnerTimer = undefined;
+	}
+}
+
 // Stable per-instance counter so each tool execution's inline images get a
 // graphics id that survives child re-creation (the image budget keys off it).
 let toolExecutionInstanceSeq = 0;
@@ -337,7 +402,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	// Spinner animation for partial task results
 	#spinnerFrame?: number;
-	#spinnerInterval?: NodeJS.Timeout;
+	#spinnerActive = false;
 	// Todo write completion strikethrough reveal animation
 	#todoStrikeInterval?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
@@ -617,14 +682,18 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
-	 * Get all image blocks from result content and details.images.
-	 * Some tools (like generate_image) store images in details to avoid bloating model context.
+	 * Get all image blocks from result content and details.
+	 * Some tools (like generate_image) store images in details to avoid bloating
+	 * model context. Xdev-dispatched tools preserve those details under
+	 * details.xdev.inner.
 	 */
-	#getAllImageBlocks(): Array<{ data?: string; mimeType?: string }> {
+	#getAllImageBlocks(): ToolImageBlock[] {
 		if (!this.#result) return [];
-		const contentImages = this.#result.content?.filter((c: any) => c.type === "image") || [];
-		const detailImages = this.#result.details?.images || [];
-		return [...contentImages, ...detailImages];
+		const contentImages = this.#result.content.filter(block => block.type === "image");
+		const details = this.#result.details;
+		const detailImages = imageBlocksFromDetails(details);
+		const xdevImages = isRecord(details) && isRecord(details.xdev) ? imageBlocksFromDetails(details.xdev.inner) : [];
+		return [...contentImages, ...detailImages, ...xdevImages];
 	}
 
 	/**
@@ -697,27 +766,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
 		const needsSpinner = isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "hub";
-		if (needsSpinner && !this.#spinnerInterval) {
+		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
-			this.#spinnerInterval = setInterval(() => {
-				// If a detached task interval from an older render path is still live,
-				// stop it the instant the block leaves the repaintable region.
-				if (this.#maybeFreezeBackgroundTask()) return;
-				const now = performance.now();
-				const frameCount = theme.spinnerFrames.length;
-				this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
-				this.#renderState.spinnerFrame = this.#spinnerFrame;
-				// Component-scoped: a spinner tick only changes this tool block, so
-				// the TUI reuses every other root subtree instead of walking the
-				// whole tree (issue #4377).
-				this.#ui.requestComponentRender(this);
-			}, SPINNER_RENDER_INTERVAL_MS);
-		} else if (!needsSpinner && this.#spinnerInterval) {
-			clearInterval(this.#spinnerInterval);
-			this.#spinnerInterval = undefined;
+			this.#spinnerActive = true;
+			registerSpinnerBlock(this);
+		} else if (!needsSpinner && this.#spinnerActive) {
+			this.#spinnerActive = false;
+			unregisterSpinnerBlock(this);
 			// Clear the last drawn frame so a non-live renderCall (e.g. a write whose
 			// args just completed) stops showing a frozen spinner glyph. Skip when a
 			// todo strike owns the frame — it sets its own value right after this.
@@ -726,6 +784,20 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+	}
+
+	/**
+	 * Advance to the shared spinner glyph and repaint just this block. Driven by
+	 * the single shared spinner ticker (see `registerSpinnerBlock`); the tick is
+	 * component-scoped so the TUI reuses every other root subtree (issue #4377).
+	 */
+	tickSpinner(frame: number): void {
+		// A detached task block that scrolled into native scrollback stops the
+		// instant it leaves the repaintable region.
+		if (this.#maybeFreezeBackgroundTask()) return;
+		this.#spinnerFrame = frame;
+		this.#renderState.spinnerFrame = frame;
+		this.#ui.requestComponentRender(this);
 	}
 
 	/**
@@ -790,7 +862,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			clearInterval(this.#todoStrikeInterval);
 			this.#todoStrikeInterval = undefined;
 		}
-		if (!this.#spinnerInterval) {
+		if (!this.#spinnerActive) {
 			this.#spinnerFrame = undefined;
 			this.#renderState.spinnerFrame = undefined;
 		}
@@ -818,7 +890,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 */
 	isNativeScrollbackLiveRegionPinned(): boolean {
 		if (this.isTranscriptBlockFinalized()) return false;
-		return this.#toolName === "vibe_wait" || this.#toolName === "task" || this.#displaceableByToolName !== undefined;
+		if (this.#toolName === "vibe_wait" || this.#toolName === "task" || this.#displaceableByToolName !== undefined) {
+			return true;
+		}
+		// A hub wait is the same self-replacing dashboard before the first
+		// progress snapshot arrives (`#displaceableByToolName` is set only once
+		// `details.jobs` exist). Pin the pending frame too so its rows cannot
+		// commit and force-seal the live poll.
+		return this.#toolName === "hub" && isHubWaitArgs(this.#args);
 	}
 
 	/**
@@ -886,9 +965,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * Stop spinner animation and cleanup resources.
 	 */
 	stopAnimation(): void {
-		if (this.#spinnerInterval) {
-			clearInterval(this.#spinnerInterval);
-			this.#spinnerInterval = undefined;
+		if (this.#spinnerActive) {
+			this.#spinnerActive = false;
+			unregisterSpinnerBlock(this);
 			this.#spinnerFrame = undefined;
 			this.#renderState.spinnerFrame = undefined;
 		}

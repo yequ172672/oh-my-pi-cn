@@ -5,7 +5,8 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 } from "../config/model-resolver";
-import type { SettingPath } from "../config/settings";
+import type { SettingPath, Settings } from "../config/settings";
+import { t } from "../i18n";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -52,6 +53,32 @@ async function runWithDetachedModeDraft(
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+/** `/extended-context status` label for the premium long-context window setting. */
+function formatExtendedContextStatus(settings: Settings): string {
+	return settings.get("extendedContext") ? t("extendedContext.on") : t("extendedContext.off");
+}
+
+/** Applies an `/extended-context` argument and returns its operator feedback. */
+function applyExtendedContextCommand(settings: Settings, args: string): string | undefined {
+	const arg = args.trim().toLowerCase();
+	const current = settings.get("extendedContext");
+	if (!arg || arg === "toggle") {
+		const enabled = !current;
+		settings.set("extendedContext", enabled);
+		return enabled ? t("extendedContext.enabled") : t("extendedContext.disabled");
+	}
+	if (arg === "on") {
+		settings.set("extendedContext", true);
+		return t("extendedContext.enabled");
+	}
+	if (arg === "off") {
+		settings.set("extendedContext", false);
+		return t("extendedContext.disabled");
+	}
+	if (arg === "status") return t("extendedContext.status", { status: formatExtendedContextStatus(settings) });
+	return undefined;
 }
 
 /** Detailed, session-effective `/computer status` diagnostics. */
@@ -430,6 +457,32 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "extended-context",
+		description: "Toggle premium long-context windows",
+		acpDescription: "Toggle extended context",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable premium long-context windows" },
+			{ name: "off", description: "Use standard-pricing context windows" },
+			{ name: "status", description: "Show extended context status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			t("extendedContext.autocomplete", { status: formatExtendedContextStatus(runtime.ctx.settings) }),
+		handle: async (command, runtime) => {
+			const output = applyExtendedContextCommand(runtime.settings, command.args);
+			if (!output) return usage(t("extendedContext.usage"), runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(output ?? t("extendedContext.usage"));
 			runtime.ctx.editor.setText("");
 		},
 	},

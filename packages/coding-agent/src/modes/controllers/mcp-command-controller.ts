@@ -1199,11 +1199,20 @@ export class MCPCommandController {
 			connectionError = error as Error;
 		}
 
-		// Server connected fine without auth — reauth is not needed. A tool-level
-		// challenge overrides this: servers may allow the anonymous handshake yet
-		// protect individual tool calls with `_meta["mcp/www_authenticate"]`.
+		// Server connected fine without auth. A tool-level challenge overrides
+		// this: servers may allow the anonymous handshake yet protect individual
+		// tool calls with `_meta["mcp/www_authenticate"]`. Even without such a
+		// challenge, a clean `initialize` is only weak evidence — per the MCP
+		// spec a server MAY permit unauthenticated `initialize` while requiring a
+		// bearer token for `tools/call`. The user explicitly asked to reauth, so
+		// honor it when the server advertises OAuth discovery metadata; only
+		// refuse when there is genuinely no OAuth endpoint to acquire.
 		if (connectionSucceeded && !authChallenge) {
-			throw new Error("Server connection succeeded without OAuth; reauthorization is not required.");
+			const discovered = "url" in config && config.url ? await discoverOAuthEndpoints(config.url) : null;
+			if (!discovered) {
+				throw new Error("Server connection succeeded without OAuth; reauthorization is not required.");
+			}
+			return discovered;
 		}
 
 		// Tool calls can carry richer RFC 6750/RFC 9728 hints than the original

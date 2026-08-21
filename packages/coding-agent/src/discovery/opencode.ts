@@ -15,6 +15,7 @@
  *
  * Priority: 55 (tool-specific provider)
  */
+import * as os from "node:os";
 import * as path from "node:path";
 import { isRecord, logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
@@ -33,7 +34,6 @@ import {
 	buildExtensionModuleItems,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
@@ -63,7 +63,7 @@ async function loadJsonConfig(
 
 	let parsed: unknown;
 	try {
-		parsed = JSONC.parse(content);
+		parsed = JSONC.parse(await substituteConfigVars(content, configPath));
 	} catch {
 		onInvalid(configPath);
 		return null;
@@ -73,6 +73,59 @@ async function loadJsonConfig(
 		return null;
 	}
 	return parsed;
+}
+
+/**
+ * Apply OpenCode's config variable substitution to raw config text.
+ *
+ * OpenCode expands `{env:VAR}` (the env value, or an empty string when unset)
+ * and `{file:path}` (file contents, trimmed and JSON-escaped) at load time,
+ * before the JSON is parsed — see opencode `packages/opencode/src/config/variable.ts`.
+ * OMP loads the same config files, so it MUST honor the same syntax; the generic
+ * `${VAR}` expansion used elsewhere never matches, leaving a header like
+ * `Bearer {env:MCP_KEY}` to reach the MCP server verbatim and 401 (#8778).
+ *
+ * `{file:path}` resolves relative to the config file's directory, or from a `~`/
+ * absolute path. A token on a `//` comment line is left untouched, matching
+ * OpenCode. A missing file expands to an empty string (OpenCode's `missing:
+ * "empty"` mode) rather than aborting discovery.
+ */
+async function substituteConfigVars(text: string, configPath: string): Promise<string> {
+	const envExpanded = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => Bun.env[name] ?? "");
+
+	const fileMatches = [...envExpanded.matchAll(/\{file:[^}]+\}/g)];
+	if (fileMatches.length === 0) return envExpanded;
+
+	const configDir = path.dirname(configPath);
+	let out = "";
+	let cursor = 0;
+	for (const match of fileMatches) {
+		const token = match[0];
+		const index = match.index ?? 0;
+		out += envExpanded.slice(cursor, index);
+		cursor = index + token.length;
+
+		// A `{file:...}` sitting on a JSONC comment line is not a real reference.
+		const lineStart = envExpanded.lastIndexOf("\n", index - 1) + 1;
+		if (envExpanded.slice(lineStart, index).trimStart().startsWith("//")) {
+			out += token;
+			continue;
+		}
+
+		let filePath = token.slice("{file:".length, -1);
+		if (filePath.startsWith("~/")) filePath = path.join(os.homedir(), filePath.slice(2));
+		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath);
+
+		const fileContent = await readFile(resolved);
+		if (fileContent === null) {
+			logger.warn("OpenCode config references a missing file", { configPath, path: resolved });
+			continue;
+		}
+		// JSON-escape so multi-line/quoted contents stay valid inside the string literal.
+		out += JSON.stringify(fileContent.trim()).slice(1, -1);
+	}
+	out += envExpanded.slice(cursor);
+	return out;
 }
 
 /**
@@ -215,7 +268,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	const items: MCPServer[] = [];
 	for (const [name, config] of mergedByName) {
-		const serverConfig = expandEnvVarsDeep(config) as OpenCodeMCPConfig;
+		const serverConfig = config as OpenCodeMCPConfig;
 		const source = sourceByName.get(name)!;
 		items.push(buildMCPServer(name, serverConfig, source));
 	}

@@ -156,7 +156,7 @@ describe("cleanse progress", () => {
 		expect(writes[3]).toBe("\n");
 	});
 
-	test("updates the command's TTY bar as repair workers finish", async () => {
+	test("renders a live repair board and permanent outcome lines on TTY output", async () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
@@ -169,12 +169,29 @@ describe("cleanse progress", () => {
 		const clean = report([]);
 		let runCount = 0;
 		const suite: cleanseCheckers.CleanseDiagnosticSuite = {
-			checkers: [{ id: "mock", label: "mock", language: "Test", command: "mock" }],
+			checkers: [{ id: "mock", label: "mock checker", language: "Test", command: "mock" }],
 			skipped: [],
 			select() {},
-			async run() {
+			async run(_signal, events) {
 				runCount += 1;
-				return runCount === 1 ? initial : clean;
+				const current = runCount === 1 ? initial : clean;
+				const descriptor = suite.checkers[0];
+				if (descriptor) {
+					events?.onCheckerStart?.(descriptor);
+					events?.onCheckerEnd?.(
+						{
+							id: descriptor.id,
+							label: descriptor.label,
+							language: descriptor.language,
+							cwd: "/repo",
+							command: descriptor.command,
+							exitCode: current.diagnostics.length === 0 ? 0 : 1,
+							diagnostics: current.diagnostics,
+						},
+						5,
+					);
+				}
+				return current;
 			},
 		};
 		let hooks: cleanseAgent.CleanseAgentHooks | undefined;
@@ -205,11 +222,20 @@ describe("cleanse progress", () => {
 			const result = await runCleanseCommand({ maxAgents: 2, all: true });
 
 			expect(result.status).toBe("clean");
-			const updates = output.filter(chunk => chunk.startsWith("\rRepairing ["));
-			expect(updates).toHaveLength(3);
-			expect(updates[0]).toContain("0/2");
-			expect(updates[1]).toContain("1/2");
-			expect(updates[2]).toContain("2/2");
+			// Strip ANSI control sequences; the board's repaint framing is not the contract.
+			const text = output.join("").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+			// Live wave header frames as workers finish.
+			expect(text).toContain("Repairing [");
+			expect(text).toContain("0/2");
+			expect(text).toContain("1/2");
+			expect(text).toContain("2/2");
+			// Checker results and agent outcomes promoted to permanent lines.
+			expect(text).toMatch(/●.*mock checker.*2 issues/);
+			expect(text).toMatch(/✓.*mock checker.*clean/);
+			expect(text).toMatch(/✓.*CleanseW1A1/);
+			expect(text).toMatch(/✓.*CleanseW1A2/);
+			expect(text).toContain("a.rs");
+			expect(text).toContain("b.rs");
 		} finally {
 			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
 			else Reflect.deleteProperty(process.stdout, "isTTY");

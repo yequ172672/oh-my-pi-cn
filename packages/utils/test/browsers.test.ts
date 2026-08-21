@@ -138,6 +138,9 @@ test("install rejects archive traversal", async () => {
 	const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/traversal.zip"));
 	const server = Bun.serve({ port: 0, fetch: () => new Response(fixture) });
 	try {
+		// Traversal member names are dropped while indexing, so extraction
+		// succeeds without them and the install fails its executable check —
+		// nothing may escape the cache root either way.
 		await expect(
 			install({
 				browser: Browser.CHROME,
@@ -146,7 +149,7 @@ test("install rejects archive traversal", async () => {
 				cacheDir: root,
 				baseUrl: String(server.url),
 			}),
-		).rejects.toThrow("Unsafe path in ZIP archive");
+		).rejects.toThrow("did not contain its expected executable");
 		expect(await fs.readdir(root)).not.toContain("escaped.txt");
 	} finally {
 		server.stop(true);

@@ -5,13 +5,19 @@ import * as path from "node:path";
 import { withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
 
+const CODEX_PROVIDER = "openai-codex";
+const DAYBREAK_MODEL = "gpt-daybreak-blue-latest";
+const CODEX_CHATGPT_MODEL_DENIAL =
+	"The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)";
 function farExpiry(): number {
 	return Date.now() + 60 * 60_000;
 }
@@ -525,6 +531,86 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(rotated).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await authStorage.getApiKey(PROVIDER, "cyber-policy")).not.toBe(first);
+	});
+
+	test("Codex ChatGPT model denial blocks only that model and rotates to a sibling", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "daybreak-denied",
+				refresh: "ref-A",
+				expires: farExpiry(),
+				accountId: "account-A",
+			},
+			{
+				type: "oauth",
+				access: "daybreak-sibling",
+				refresh: "ref-B",
+				expires: farExpiry(),
+				accountId: "account-B",
+			},
+		]);
+
+		const sessionId = "daybreak-model-policy";
+		const first = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+		expect(first).toBe("daybreak-denied");
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400, {
+			code: "invalid_request_error",
+		});
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				apiKey: first,
+			}),
+		).toBe(false);
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: "gpt-5.3-codex",
+				apiKey: first,
+			}),
+		).toBe(false);
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(first);
+		const usageLimitSpy = vi.spyOn(codexStorage, "markUsageLimitReached");
+		const rotated = await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: first,
+		});
+
+		expect(rotated).toBe(true);
+		expect(usageLimitSpy).not.toHaveBeenCalled();
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
+			"daybreak-sibling",
+		);
+
+		const deniedRow = store
+			.listAuthCredentials(CODEX_PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.access === "daybreak-denied");
+		if (!deniedRow) throw new Error("denied credential row missing");
+		const modelBlock = store.getCredentialBlock?.(
+			deniedRow.id,
+			`${CODEX_PROVIDER}:oauth`,
+			"model-policy:gpt-daybreak-blue-latest",
+		);
+		expect(typeof modelBlock).toBe("number");
+		expect(store.getCredentialBlock?.(deniedRow.id, `${CODEX_PROVIDER}:oauth`, "chat")).toBeUndefined();
+		expect(store.getCredentialBlock?.(deniedRow.id, `${CODEX_PROVIDER}:oauth`, "")).toBeUndefined();
+
+		const otherModelStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await otherModelStorage.reload();
+		expect(
+			await otherModelStorage.getApiKey(CODEX_PROVIDER, "other-codex-model", {
+				modelId: "gpt-5.3-codex",
+			}),
+		).toBe("daybreak-denied");
 	});
 
 	test("rotateSessionCredential treats structured usage codes as quota blocks despite generic messages", async () => {

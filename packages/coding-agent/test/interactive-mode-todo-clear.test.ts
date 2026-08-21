@@ -158,6 +158,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 
 		vi.advanceTimersByTime(999);
 		expect(renderTodos(mode)).toContain("done task");
+		expect(renderTodos(mode)).toContain("TODO");
 
 		vi.advanceTimersByTime(1);
 		expect(renderTodos(mode)).not.toContain("done task");
@@ -297,9 +298,10 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 		// Lightened: no boxed top/bottom rules.
 		expect(lines.some(line => line === "─".repeat(80))).toBe(false);
-		// Root header carries overall stage progression (on stage 1 of 2).
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("1/2");
+		// The title remains a compact anchor; overall progress colors the tree
+		// spine and tail, not the title text.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 		// Active stage: highlighted header with its own task progress, expanded as a
 		// connector tree; the just-completed task stays as the lead row so progress
 		// is visible while the stage still has open work.
@@ -322,7 +324,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 		expect(mode.todoContainer.render(80)).toHaveLength(0);
 	});
 
-	it("omits the stage count and roman numeral for a single-phase list", () => {
+	it("keeps the summed progress bar but omits the roman numeral for a single-phase list", () => {
 		mode.setTodos([
 			{
 				name: "Tasks",
@@ -336,16 +338,17 @@ describe("InteractiveMode todo HUD anchor", () => {
 			.render(80)
 			.flatMap(line => line.split("\n"))
 			.map(line => Bun.stripANSI(line));
-		// One stage → no redundant "1/1" stage count on the root.
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).not.toContain("/");
+		// One stage still renders the compact title; progress belongs to the
+		// tree spine and tail.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 		// The stage keeps its task progress; no roman numeral for a lone stage.
 		expect(lines.some(line => line.includes("Tasks") && line.includes("0/2"))).toBe(true);
 		expect(lines.some(line => line.includes("I. Tasks"))).toBe(false);
 		expect(lines.some(line => line.includes("alpha"))).toBe(true);
 	});
 
-	it("caps the visible stage list and leaves the hidden ones to the header count", () => {
+	it("caps the visible stage list and summarizes the hidden ones in an overflow row", () => {
 		const stage = (name: string): TodoPhase => ({ name, tasks: [{ content: `${name} task`, status: "pending" }] });
 		mode.setTodos([
 			stage("Discovery"),
@@ -360,14 +363,15 @@ describe("InteractiveMode todo HUD anchor", () => {
 			.render(80)
 			.flatMap(line => line.split("\n"))
 			.map(line => Bun.stripANSI(line));
-		// Active stage + four following stages render; the rest are dropped.
+		// Active stage + four following stages render; the rest collapse into a
+		// trailing "… n more stages" row.
 		expect(lines.some(line => line.includes("II. Two"))).toBe(true);
 		expect(lines.some(line => line.includes("V. Five"))).toBe(true);
 		expect(lines.some(line => line.includes("Six"))).toBe(false);
-		// No overflow row — the header's "1/7" implies the hidden stages.
-		expect(lines.some(line => line.includes("more"))).toBe(false);
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("1/7");
+		expect(lines.some(line => line.includes("2 more stages"))).toBe(true);
+		// Hidden stages do not change the compact title.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 	});
 
 	it("anchors the todo HUD as a native-scrollback live region while populated", () => {

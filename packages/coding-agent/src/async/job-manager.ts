@@ -29,9 +29,12 @@ interface PollEscalationState {
 	lastPollEndAt: number;
 }
 
+/** Kind of work a managed job runs; drives job-row badges and delivery labels. */
+export type AsyncJobType = "bash" | "task" | "eval";
+
 export interface AsyncJob {
 	id: string;
-	type: "bash" | "task";
+	type: AsyncJobType;
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
@@ -183,7 +186,7 @@ export class AsyncJobManager {
 	}
 
 	register(
-		type: "bash" | "task",
+		type: AsyncJobType,
 		label: string,
 		run: (ctx: {
 			jobId: string;

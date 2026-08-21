@@ -392,7 +392,7 @@ describe("setup wizard short terminals", () => {
 				component.handleInput(key);
 				const frame = component.render(80).map(line => Bun.stripANSI(line));
 				expect(frame.length).toBe(24);
-				expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
+				expect(frame.some(line => line.includes(`${theme.nav.cursor} `))).toBe(true);
 			}
 		} finally {
 			nowSpy.mockRestore();
@@ -484,6 +484,47 @@ describe("setup wizard glyph scene", () => {
 		await Bun.sleep(20);
 		expect(settings.get("symbolPreset")).toBe("nerd");
 		expect(finished).toBe(true);
+	});
+});
+
+describe("setup wizard composer scene", () => {
+	it("renders the version-2 composer choices in Chinese", async () => {
+		await initTheme(false, "unicode", false, "titanium", "light");
+		initializeLanguage("zh-CN");
+		const settings = Settings.isolated();
+		const scene = ALL_SCENES.find(candidate => candidate.id === "composer-shape");
+		expect(scene).toBeDefined();
+
+		const host = {
+			ctx: {
+				settings,
+				ui: { invalidate: () => {}, requestRender: () => {} },
+			},
+			requestRender: () => {},
+			finish: () => {},
+			setFocus: () => {},
+			restoreFocus: () => {},
+		} as unknown as SetupSceneHost;
+
+		const controller = scene!.mount(host);
+		const frame = Bun.stripANSI(controller.render(120).join("\n"));
+		expect(scene!.title).toBe("选择输入框样式");
+		expect(controller.title).toBe("选择输入框样式");
+		expect(controller.subtitle).toBe("选择适合当前工作流的输入框和状态栏布局。");
+		expect(frame).toContain("选择一种布局；下方预览会实时更新。按 Enter 确认。");
+		expect(frame).toContain("预览：");
+		expect(frame).toContain("提出问题、编辑文件或运行工具");
+		expect(frame).toContain("圆角框（默认）");
+		expect(frame).toContain("Claude Code");
+		expect(frame).toContain("Pi");
+		expect(frame).toContain("无边框");
+		expect(frame).toContain("顶部横线停靠");
+		expect(frame).toContain("紧凑输入栏");
+		expect(frame).toContain("强调色侧栏");
+		expect(frame).not.toContain("Choose composer shape");
+		expect(frame).not.toContain("Rounded Box (Default)");
+		expect(frame).not.toContain("Select a layout");
+		expect(frame).not.toContain("Ask anything, edit files, run tools");
 	});
 });
 

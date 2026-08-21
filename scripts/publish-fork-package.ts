@@ -5,12 +5,13 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import {
 	type ForkReleaseManifest,
 	parseForkReleaseManifest,
 } from "../packages/coding-agent/src/distribution-schema.ts";
-import { applyPublishBin, packages } from "./ci-release-publish.ts";
+import { applyPublishBin, legalPayloadFiles, packages, stageLegalPayloads } from "./ci-release-publish.ts";
 
 export const FORK_NPM_PACKAGE = "omp-cn";
 export const FORK_REPOSITORY = "yequ172672/oh-my-pi-cn";
@@ -80,6 +81,9 @@ export function createForkManifest(manifest: Manifest, metadata: ForkReleaseMeta
 	const ompFork: ForkManifestMetadata = { ...metadata, releaseTag: `omp-cn-v${metadata.forkVersion}` };
 	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
 	if (!files.includes("fork-release.json")) files.push("fork-release.json");
+	for (const legalFile of legalPayloadFiles(manifest.license)) {
+		if (!files.includes(legalFile)) files.push(legalFile);
+	}
 	return {
 		...manifest,
 		name: FORK_NPM_PACKAGE,
@@ -119,6 +123,9 @@ export function validateForkManifest(manifest: Manifest, metadata: ForkReleaseMe
 		failures.push("repository");
 	const expectedOmpFork: ForkManifestMetadata = { ...metadata, releaseTag: `omp-cn-v${metadata.forkVersion}` };
 	if (JSON.stringify(manifest.ompFork) !== JSON.stringify(expectedOmpFork)) failures.push("ompFork");
+	for (const legalFile of legalPayloadFiles(manifest.license)) {
+		if (!manifest.files?.includes(legalFile)) failures.push(`files.${legalFile}`);
+	}
 	for (const section of [manifest.dependencies, manifest.optionalDependencies, manifest.peerDependencies]) {
 		for (const [name, version] of Object.entries(section ?? {})) {
 			if (!name.startsWith("@oh-my-pi/")) continue;
@@ -157,6 +164,26 @@ export async function withRestoredFile<T>(filePath: string, action: () => Promis
 	}
 }
 
+export async function withRestoredFiles<T>(filePaths: readonly string[], action: () => Promise<T>): Promise<T> {
+	const backups = new Map<string, Uint8Array | null>();
+	for (const filePath of filePaths) {
+		try {
+			backups.set(filePath, new Uint8Array(await Bun.file(filePath).arrayBuffer()));
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			backups.set(filePath, null);
+		}
+	}
+	try {
+		return await action();
+	} finally {
+		for (const [filePath, original] of backups) {
+			if (original) await Bun.write(filePath, original);
+			else await fs.rm(filePath, { force: true });
+		}
+	}
+}
+
 export function parseCliOptions(argv: readonly string[]): CliOptions {
 	const options: CliOptions = {
 		dryRun: argv.includes("--dry-run"),
@@ -188,6 +215,11 @@ export async function inspectForkTarball(tarballPath: string, metadata: ForkRele
 	}
 	if (!entries.includes("package/fork-release.json")) {
 		throw new Error("Validated tarball is missing package/fork-release.json");
+	}
+	for (const legalFile of legalPayloadFiles(manifest.license)) {
+		if (!entries.includes(`package/${legalFile}`)) {
+			throw new Error(`Validated tarball is missing package/${legalFile}`);
+		}
 	}
 	const metadataResult = await $`tar -xOzf ${tarballPath} package/fork-release.json`.quiet().nothrow();
 	if (metadataResult.exitCode !== 0) throw new Error("Cannot read fork-release.json from validated tarball");
@@ -259,30 +291,40 @@ async function main(): Promise<void> {
 	const metadata = await loadForkReleaseMetadata();
 	await runChecks(options.skipCheck);
 	let packed: { tempDir: string; tarballPath: string; sha256: string } | undefined;
-	await withRestoredFile(manifestPath, async () => {
-		try {
-			await applyPublishBin(packageRelDir, true);
-			const manifest = (await Bun.file(manifestPath).json()) as Manifest;
-			await Bun.write(manifestPath, `${JSON.stringify(createForkManifest(manifest, metadata), null, "\t")}\n`);
-			packed = await packValidatedTarball(metadata);
-			let retainedPath: string | undefined;
-			if (options.outputDir) {
-				await fs.mkdir(options.outputDir, { recursive: true });
-				retainedPath = path.join(options.outputDir, path.basename(packed.tarballPath));
-				await fs.copyFile(packed.tarballPath, retainedPath);
-				await Bun.write(`${retainedPath}.sha256`, formatSha256Record(packed.sha256, path.basename(retainedPath)));
-			}
-			const action = options.dryRun ? "DRY RUN" : "VALIDATED";
-			const destination = retainedPath
-				? ` -> ${retainedPath}`
-				: options.packOnly
-					? " (temporary tarball removed after validation)"
-					: "";
-			console.log(`${action} ${FORK_NPM_PACKAGE}@${metadata.forkVersion} sha256=${packed.sha256}${destination}`);
-		} finally {
-			if (packed) await fs.rm(packed.tempDir, { recursive: true, force: true });
-		}
-	});
+	await withRestoredFiles(
+		legalPayloadFiles("MIT").map(fileName => path.join(packageDir, fileName)),
+		async () =>
+			withRestoredFile(manifestPath, async () => {
+				try {
+					await stageLegalPayloads(packageDir, "MIT", true, repoRoot);
+					await applyPublishBin(packageRelDir, true);
+					const manifest = (await Bun.file(manifestPath).json()) as Manifest;
+					await Bun.write(manifestPath, `${JSON.stringify(createForkManifest(manifest, metadata), null, "\t")}\n`);
+					packed = await packValidatedTarball(metadata);
+					let retainedPath: string | undefined;
+					if (options.outputDir) {
+						await fs.mkdir(options.outputDir, { recursive: true });
+						retainedPath = path.join(options.outputDir, path.basename(packed.tarballPath));
+						await fs.copyFile(packed.tarballPath, retainedPath);
+						await Bun.write(
+							`${retainedPath}.sha256`,
+							formatSha256Record(packed.sha256, path.basename(retainedPath)),
+						);
+					}
+					const action = options.dryRun ? "DRY RUN" : "VALIDATED";
+					const destination = retainedPath
+						? ` -> ${retainedPath}`
+						: options.packOnly
+							? " (temporary tarball removed after validation)"
+							: "";
+					console.log(
+						`${action} ${FORK_NPM_PACKAGE}@${metadata.forkVersion} sha256=${packed.sha256}${destination}`,
+					);
+				} finally {
+					if (packed) await fs.rm(packed.tempDir, { recursive: true, force: true });
+				}
+			}),
+	);
 }
 
 if (import.meta.main) await main();

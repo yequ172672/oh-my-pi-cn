@@ -7,6 +7,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import type { AsyncJobType } from "../../async";
+import { t } from "../../i18n";
+import type { DaemonSnapshot } from "../../launch/protocol";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -32,10 +35,10 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	const details = (
 		message as CustomMessage<{
 			jobId?: string;
-			type?: "bash" | "task";
+			type?: AsyncJobType;
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number }>;
 		}>
 	).details;
 	const jobs =
@@ -55,9 +58,44 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		const typeLabel = job.type ? `[${job.type}]` : "[job]";
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		const line = [
-			theme.fg("success", `${theme.status.done} Background job completed`),
+			theme.fg("success", `${theme.status.done} ${t("transcript.backgroundCompleted")}`),
 			theme.fg("dim", typeLabel),
 			theme.fg("accent", jobId),
+			duration ? theme.fg("dim", `(${duration})`) : undefined,
+		]
+			.filter(Boolean)
+			.join(" ");
+		block.addChild(new Text(line, 1, 0));
+	}
+	return new ToolActivityContainer(block);
+}
+
+/**
+ * Render a `launch-completion` custom message (terminal supervised-process
+ * exits from the launch broker) as a transcript block of one compact
+ * "Supervised process ..." row per daemon, matching background-job rows.
+ */
+export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	const details = (message as CustomMessage<{ daemons?: DaemonSnapshot[] }>).details;
+	const block = new TranscriptBlock();
+	const daemons = details?.daemons ?? [];
+	if (daemons.length === 0 && typeof message.content === "string") {
+		block.addChild(new Text(theme.fg("dim", `${theme.status.done} ${message.content}`), 1, 0));
+	}
+	for (const daemon of daemons) {
+		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
+		const duration =
+			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
+				? formatDuration(daemon.exitedAt - daemon.startedAt)
+				: undefined;
+		const line = [
+			failed
+				? theme.fg("error", `${theme.status.error} ${t("transcript.supervisedFailed")}`)
+				: theme.fg("success", `${theme.status.done} ${t("transcript.supervisedCompleted")}`),
+			theme.fg("accent", daemon.name),
+			daemon.exitCode !== undefined
+				? theme.fg("dim", `(${t("transcript.exitCode", { code: daemon.exitCode })})`)
+				: undefined,
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]
 			.filter(Boolean)
@@ -107,16 +145,19 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 	for (const file of files) {
 		let suffix: string;
 		if (file.skippedReason === "tooLarge" || file.skippedReason === "binary") {
-			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
-			suffix = file.skippedReason === "binary" ? `(skipped: binary, ${size})` : `(skipped: ${size})`;
+			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : t("transcript.unknownSize");
+			suffix =
+				file.skippedReason === "binary"
+					? `(${t("transcript.skippedBinary", { size })})`
+					: `(${t("transcript.skippedSize", { size })})`;
 		} else {
 			suffix = file.image
-				? "(image)"
+				? `(${t("transcript.image")})`
 				: file.lineCount === undefined
-					? "(unknown lines)"
-					: `(${file.lineCount} lines)`;
+					? `(${t("transcript.unknownLines")})`
+					: `(${t("transcript.lines", { count: file.lineCount })})`;
 		}
-		const text = `${theme.fg("dim", `${theme.tree.last} `)}${theme.fg("muted", "Read")} ${theme.fg(
+		const text = `${theme.fg("dim", `${theme.tree.last} `)}${theme.fg("muted", t("transcript.read"))} ${theme.fg(
 			"accent",
 			file.path,
 		)} ${theme.fg("dim", suffix)}`;
@@ -207,7 +248,7 @@ export type AssistantErrorPresentation =
 
 function sanitizeRecoveredRetryNote(note: string): string {
 	const normalized = replaceTabs(note).replace(/\s+/g, " ").trim();
-	return truncateToWidth(normalized || "retried", TRUNCATE_LENGTHS.CONTENT);
+	return truncateToWidth(normalized || t("transcript.retried"), TRUNCATE_LENGTHS.CONTENT);
 }
 
 /**

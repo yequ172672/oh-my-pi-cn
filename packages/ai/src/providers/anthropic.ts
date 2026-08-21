@@ -3548,6 +3548,12 @@ function buildToolResultBlock(
 		}
 		content = content.filter(block => block.type === "text");
 	}
+	// An empty array is valid for the official API, but strict Anthropic-compatible
+	// endpoints (Z.AI GLM: 400 code 1213 "The prompt parameter was not received
+	// normally") reject it; the empty-string form is accepted by both.
+	if (Array.isArray(content) && content.length === 0) {
+		content = "";
+	}
 	content = ensureErrorToolResultWireContent(content, msg.isError);
 	const block: ContentBlockParam = {
 		type: "tool_result",

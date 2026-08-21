@@ -386,8 +386,9 @@ export interface UsageWindowSeries {
 	accountKey: string;
 	/** Email/account id when known, else the stable account key. */
 	accountLabel: string;
-	/** Groups the same limit window across accounts (window label or limit id). */
+	/** Groups the same limit window across accounts (the provider limit id). */
 	windowKey: string;
+	/** Human label of the limit (distinguishes same-duration windows). */
 	windowLabel: string;
 	points: UsageWindowPoint[];
 }
@@ -399,7 +400,9 @@ export interface UsageWindowSeries {
  */
 export interface ProviderWindowInsight {
 	provider: string;
+	/** Groups the same limit window across accounts (the provider limit id). */
 	windowKey: string;
+	/** Human label of the limit (distinguishes same-duration windows). */
 	windowLabel: string;
 	/** Accounts with at least one snapshot for this window in range. */
 	accounts: number;

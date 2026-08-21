@@ -22,6 +22,7 @@ export const settingsZhCN: Readonly<Record<string, string>> = {
 
 	// Settings groups.
 	Theme: "主题",
+	Composer: "输入框",
 	"Status Line": "状态栏",
 	Display: "显示",
 	Images: "图像",
@@ -624,7 +625,7 @@ export const settingsZhCN: Readonly<Record<string, string>> = {
 	"Summarize in-place and keep the current session": "原地总结并保留当前会话",
 	Handoff: "交接",
 	"Generate handoff and continue in a new session": "生成交接文档并在新会话中继续",
-	Shake: "Shake",
+	Shake: "抖动压缩",
 	"Drop heavy content (tool results + large blocks) in place; recover via artifact":
 		"原地移除大体积内容（工具结果和大型区块）；通过产物恢复",
 	Snapcompact: "Snapcompact",
@@ -1562,9 +1563,88 @@ export const settingsZhCN: Readonly<Record<string, string>> = {
 	"Doc 8on16, black": "Doc 8on16，黑色",
 	"Doc 8on16, sentence hues": "Doc 8on16，句子色调",
 	"Doc 8on16, sentence hues + dimmed stopwords": "Doc 8on16，句子色调 + 停用词变暗",
+	// Codex Code Mode.
+	"Codex Code Mode": "Codex 代码模式",
+	"Route Codex code_mode_only models (GPT-5.6) through the eval tool as a programmatic execution surface: the direct tool surface collapses to eval/ask/todo and every other session tool is invoked from eval cells. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.":
+		"通过 eval 工具将 Codex 的 code_mode_only 模型（GPT-5.6）作为可编程执行环境运行：直接工具界面将精简为 eval/ask/todo，其余会话工具均从 eval 单元调用。行为与 codex-rs 代码模式一致；“自动”将遵循模型目录标记。",
+	"Codex Code Mode Direct Tools": "Codex 代码模式直接工具",
+	"Extra tool names to keep directly callable alongside eval/ask/todo when Codex Code Mode is active.":
+		"Codex 代码模式启用时，除 eval/ask/todo 外仍可直接调用的额外工具名称。",
+
+	// Composer and context-reactive status line.
+	"Composer Shape": "输入框样式",
+	"Visual layout of the input editor and status line": "输入编辑器和状态栏的视觉布局",
+	"Rounded Box (Default)": "圆角框（默认）",
+	"Status line embedded in top border, compact 2-line prompt": "状态栏嵌入顶部边框，采用紧凑的双行输入框",
+	"Claude Code": "Claude Code",
+	"Full-width horizontal rules above and below, status line at bottom": "上下使用全宽横线，状态栏位于底部",
+	Pi: "Pi",
+	"Framed horizontal rules with status line at bottom": "使用带边框的横线，状态栏位于底部",
+	Borderless: "无边框",
+	"Clean prompt glyph with status line at bottom, no box borders": "简洁的输入提示符，状态栏位于底部，不显示框线",
+	"Top Rule Dock": "顶部横线停靠",
+	"Single top rule with status docked onto it and below": "使用单条顶部横线，状态信息停靠在横线上及其下方",
+	"Compact Field": "紧凑输入栏",
+	"Filled one-row field with accent end caps": "带强调色端帽的单行填充输入栏",
+	"Accent Rail": "强调色侧栏",
+	"Filled one-row field anchored by a single accent rail": "由单条强调色侧栏锚定的单行填充输入栏",
+	"Context-Reactive Line": "上下文响应线",
+	"How the line between the left and right segments reflects context usage (box composer only)":
+		"左右状态区之间的横线如何反映上下文用量（仅适用于框式输入框）",
+	Percentage: "百分比",
+	"Used portion in accent color, remainder dimmed": "已用部分显示强调色，其余部分变暗",
+	Annotated: "带标记",
+	"Percentage plus ticks at the speculative and auto-compaction boundaries":
+		"显示百分比，并在推测压缩和自动压缩边界处添加刻度",
+	Embedded: "嵌入式",
+	"Annotated line with the context percentage and window embedded in the gauge":
+		"在带标记的横线中嵌入上下文百分比和窗口大小",
+	"Solid accent line, no context feedback": "纯强调色横线，不显示上下文反馈",
+
+	// Context maintenance.
+	"Extended Context": "扩展上下文",
+	"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window":
+		"对超过阈值后额外计费的模型启用高级长上下文窗口（例如 GPT-5.6 1M 在输入超过 272K 后按 2 倍计费）；关闭后会限制在标准计价窗口内",
+	"Compaction Method Order": "压缩方法顺序",
+	"Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice":
+		"自动上下文维护的首选回退顺序；方法不可用或失败时将尝试下一项",
+	"OpenAI server compaction": "OpenAI 服务器压缩",
+	"Use provider-native OpenAI-compatible server compaction when the active route supports it":
+		"当前路由支持时，使用提供商原生的 OpenAI 兼容服务器压缩",
+	"Archive history onto dense bitmap images the active vision model reads back; no LLM call":
+		"将历史记录归档为高密度位图，由当前视觉模型读回；无需调用 LLM",
+	"Generate a handoff document and continue from it as the compaction summary":
+		"生成交接文档，并将其作为压缩摘要继续会话",
+	"Soft compaction": "软压缩",
+	"Summarize in place with a compaction model without using server compaction":
+		"使用压缩模型就地生成摘要，不使用服务器压缩",
+	"Drop recoverable heavy content in place without an LLM call": "就地移除可恢复的大体积内容，无需调用 LLM",
+	"Async Compaction": "异步压缩",
+	"Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed":
+		"上下文接近压缩阈值时在后台提前生成摘要，越过阈值后接入已准备好的结果",
+
+	// Eval and provider caching.
+	"Eval Auto-Background": "Eval 自动后台运行",
+	"Automatically background long-running eval cells and deliver the result later":
+		"自动将长时间运行的 eval 单元转入后台，并在稍后返回结果",
+	"Prompt Cache Retention": "提示词缓存保留策略",
+	"Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI)":
+		"转发给支持提示词缓存保留策略的提供商（Anthropic、Bedrock、OpenRouter、OpenAI）",
+	"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies":
+		"使用提供商默认值——Anthropic 使用 5 分钟缓存，并在空闲时通过保活刷新维持热度；PI_CACHE_RETENTION 仍然生效",
+	"Short (5m)": "短期（5 分钟）",
+	"Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle":
+		"缓存写入成本最低；Anthropic 会在空闲时通过有限次数的保活刷新维持缓存热度",
+	"Long (1h)": "长期（1 小时）",
+	"1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests":
+		"提供商支持时使用 1 小时 TTL；写入成本较高，不发送保活刷新请求",
+	"Disable prompt caching and cache-affinity routing": "禁用提示词缓存和缓存亲和路由",
+
 	"External Thinking": "外部思考",
 	"Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning":
 		"私有草稿区，不向用户显示；启用后会关闭受支持的 GPT、Claude 和 Gemini 内置推理",
+	"At your own risk: providers have flagged this request shape as abuse, up to account-level enforcement":
+		"风险自负：提供商已将此类请求判定为滥用，最严重可能触发账号级处置",
 	"Tool Call Handler Timeout (ms)": "工具调用处理器超时（毫秒）",
 	"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count":
 		"扩展 tool_call 处理器的有效工作超时时间，必须为有限正数；无效值使用 30000 毫秒，等待 OMP 自有对话框的时间不计入",

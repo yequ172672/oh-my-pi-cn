@@ -7,6 +7,8 @@ import {
 	astEdit,
 	astMatch,
 	blockRangeAt,
+	countTokens,
+	Encoding,
 	executeShell,
 	FileType,
 	fuzzyFind,
@@ -66,6 +68,13 @@ This is a test file.
 
 	await fs.writeFile(path.join(testDir, "history-search.ts"), "export const historySearch = true;\n");
 }
+
+describe("countTokens", () => {
+	it("counts native UTF-16 content without its N-API terminator and sums arrays", () => {
+		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
+		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
+	});
+});
 
 async function cleanupFixtures() {
 	await fs.rm(testDir, { recursive: true, force: true });

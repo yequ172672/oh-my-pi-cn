@@ -32,6 +32,19 @@ describe("HookSelectorComponent", () => {
 		}
 	});
 
+	it("renders a multiline title in the border and body without dropping detail", () => {
+		const component = new HookSelectorComponent(
+			"Delete session?\nsession-2026-08-20",
+			["Delete", "Cancel"],
+			() => {},
+			() => {},
+		);
+
+		const lines = component.render(80).map(line => Bun.stripANSI(line));
+		expect(lines[0]).toContain("Delete session?");
+		expect(lines.some(line => line.includes("session-2026-08-20"))).toBe(true);
+	});
+
 	it("wraps outlined option text without omitting the tail", () => {
 		const options = [
 			"Option A: Move to OMP-native only by migrating reusable shared AI instructions into .omp/AGENTS.md, .omp/rules, .omp/skills, and .omp/agents while deliberately not creating a root .github directory.",

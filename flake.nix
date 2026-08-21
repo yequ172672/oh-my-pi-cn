@@ -125,7 +125,7 @@
                   type = pkgs.lib.types.listOf pkgs.lib.types.package;
                   default = [ ];
                 };
-                options.home.file = pkgs.lib.mkOption {
+                options.home.activation = pkgs.lib.mkOption {
                   type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
                   default = { };
                 };
@@ -152,7 +152,7 @@
           };
           modulesEvaluate =
             assert builtins.elem self.packages.${system}.default homeManagerEvaluation.config.home.packages;
-            assert homeManagerEvaluation.config.home.file ? ".omp/agent/config.yml";
+            assert homeManagerEvaluation.config.home.activation ? ompConfig;
             assert builtins.elem self.packages.${system}.default
               nixosEvaluation.config.environment.systemPackages;
             pkgs.runCommand "omp-module-evaluation" { } "touch $out";

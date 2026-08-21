@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import { ptree, TempDir } from "@oh-my-pi/pi-utils";
+import { type ChildProcess, ptree, TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_AGENT = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 
@@ -243,4 +243,41 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			"Agent process exited with code 23. Stderr: fixture worker failed",
 		);
 	});
+
+	test("start() rejects instead of hanging when a pre-ready worker closes stdout and never exits", async () => {
+		// The worker outlives its own stdout, so start() cannot learn an exit code
+		// and must still fail: it waits a bounded time for the exit, then reports
+		// the stream end. A regression stalls until the 30s ready timeout, which
+		// this test's own timeout catches.
+		let resolveExit: ((exitCode: number) => void) | undefined;
+		let killCalls = 0;
+		const fakeChild = {
+			stdout: new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.close();
+				},
+			}),
+			stdin: { write: () => 0, flush: () => 0 },
+			exited: new Promise<number>(resolve => {
+				resolveExit = resolve;
+			}),
+			peekStderr: () => "worker went quiet",
+			kill() {
+				killCalls += 1;
+				resolveExit?.(0);
+			},
+		};
+		const spawn = spyOn(ptree, "spawn").mockImplementation(() => fakeChild as unknown as ChildProcess);
+
+		try {
+			using client = new RpcClient({ cliPath: MOCK_AGENT, terminationGraceMs: 10 });
+			await expect(client.start()).rejects.toThrow(
+				"Agent output stream ended before ready. Stderr: worker went quiet",
+			);
+			// The failed start must also reap the orphan rather than leak it.
+			expect(killCalls).toBe(1);
+		} finally {
+			spawn.mockRestore();
+		}
+	}, 5_000);
 });

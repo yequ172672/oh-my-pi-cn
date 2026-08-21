@@ -499,17 +499,21 @@ describe("imageGenTool", () => {
 		expect(requestUrl).toBe("https://example-proxy.invalid/backend-api/codex/responses");
 		expect(requestHeaders?.get("authorization")).toBe("Bearer opaque-proxy-key");
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
+		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
 		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
 		expect(requestHeaders?.get("originator")).toBe("pi");
 		expect(result.details?.provider).toBe("openai-codex");
 		expect(result.details?.imageCount).toBe(1);
 	});
 
-	it("adds Codex account headers when the bearer token exposes an account id", async () => {
+	it("adds Codex account and residency headers from bearer token claims", async () => {
 		let requestHeaders: Headers | undefined;
 		const tokenPayload = Buffer.from(
 			JSON.stringify({
-				"https://api.openai.com/auth": { chatgpt_account_id: "acc_test" },
+				"https://api.openai.com/auth": {
+					chatgpt_account_id: "acc_test",
+					chatgpt_data_residency: "us",
+				},
 			}),
 		).toString("base64");
 		const codexJwt = `header.${tokenPayload}.signature`;
@@ -569,6 +573,7 @@ describe("imageGenTool", () => {
 
 		expect(requestHeaders?.get("authorization")).toBe(`Bearer ${codexJwt}`);
 		expect(requestHeaders?.get("chatgpt-account-id")).toBe("acc_test");
+		expect(requestHeaders?.get("x-openai-internal-codex-residency")).toBe("us");
 		expect(result.details?.imageCount).toBe(1);
 	});
 	it("routes xAI image generation with xAI-only aspect ratios", async () => {

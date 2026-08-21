@@ -7,7 +7,7 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint } from "./paths";
+import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1384,6 +1384,13 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
+	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
+	// dir back to its project (and derive the Windows pipe name) offline.
+	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
+		logger.warn("Failed to record daemon scope metadata", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
 	// Reclaim sibling daemon scopes left behind by dead brokers (issue #8674).
 	// Detached and non-throwing so it never delays clients connecting to us.
 	void pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {

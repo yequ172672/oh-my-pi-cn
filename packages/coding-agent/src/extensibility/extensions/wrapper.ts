@@ -14,6 +14,7 @@ import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -349,7 +350,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let executionError: Error | undefined;
 
 		try {
-			result = await this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context);
+			// A denied file write or delete inside this tool can be brokered to an
+			// extension handler, and that registry is PROCESS-WIDE — so the session is
+			// named here, the one place where every tool's execution and the runner
+			// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
+			// registry with this class whenever a runner exists). Inert with no
+			// fallback registered: no scope is entered.
+			result = await withFileMutationSession(this.runner.sessionId, () =>
+				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+			);
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
 			result = {

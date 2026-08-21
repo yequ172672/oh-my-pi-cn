@@ -2363,6 +2363,7 @@ providers:
 					data: [
 						{
 							model_group: "gpt-big",
+							providers: ["openai"],
 							max_input_tokens: 262_144,
 							max_output_tokens: 16_384,
 							supports_vision: true,
@@ -2383,6 +2384,7 @@ providers:
 		expect(model?.maxTokens).toBe(16_384);
 		expect(model?.input).toEqual(["text", "image"]);
 		expect(model?.reasoning).toBe(true);
+		expect(model?.api).toBe("openai-responses");
 	});
 
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {
@@ -2432,7 +2434,7 @@ providers:
 				return new Response("{}", { status: 404 });
 			}
 			if (url === "http://localhost:4000/v1/models") {
-				return Response.json({ data: [{ id: "default-litellm" }] });
+				return Response.json({ data: [{ id: "default-litellm" }, { id: "openai/gpt-5" }] });
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
@@ -2440,6 +2442,7 @@ providers:
 		await registry.refresh();
 
 		expect(registry.find("litellm-test", "default-litellm")?.baseUrl).toBe("http://localhost:4000/v1");
+		expect(registry.find("litellm-test", "openai/gpt-5")?.api).toBe("openai-responses");
 	});
 
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -49,5 +50,55 @@ describe("startup model cache header restoration (#5780)", () => {
 			if (!live) continue;
 			expect(live.headers).toEqual(model.headers);
 		}
+	});
+
+	test("cached configured-discovery models regain derived auth headers on registry startup", async () => {
+		const modelsPath = path.join(tempDir, "models.json");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					probe: {
+						baseUrl: "https://example.invalid/v1/",
+						api: "openai-completions",
+						apiKey: "test-key",
+						authHeader: true,
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		const primedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) => {
+				expect(String(input)).toBe("https://example.invalid/v1/models");
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer test-key");
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		await primedRegistry.refreshProvider("probe", "online");
+		expect(primedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const restartedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		const cached = restartedRegistry.find("probe", "probe-model");
+		expect(cached).toBeDefined();
+		expect(cached?.headers?.Authorization).toBe("Bearer test-key");
+
+		const oldCacheDb = new Database(cacheDbPath);
+		oldCacheDb.run("UPDATE model_cache SET unrestorable_header_model_ids = ?", [JSON.stringify(["probe-model"])]);
+		oldCacheDb.close();
+		const upgradedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		upgradedRegistry.refreshInBackground();
+		await upgradedRegistry.awaitBackgroundRefresh();
+		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+
+		const nextRestartRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		expect(nextRestartRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
 	});
 });

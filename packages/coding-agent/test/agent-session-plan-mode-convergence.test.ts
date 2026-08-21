@@ -12,17 +12,26 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentTool,
+	type StreamFn,
+	type ToolApproval,
+	type ToolLoadMode,
+} from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import planModeReminderPrompt from "../src/prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 
@@ -46,6 +55,22 @@ function makeTool(name: string): AgentTool {
 		parameters: type({}),
 		async execute() {
 			return { content: [{ type: "text" as const, text: "ok" }] };
+		},
+	};
+}
+
+function makeMcpTool(name: string, loadMode: ToolLoadMode, approval: ToolApproval = "read"): CustomTool {
+	return {
+		name,
+		label: name,
+		description: `Test MCP tool ${name}`,
+		parameters: type({}),
+		loadMode,
+		approval,
+		mcpServerName: name.split("__")[1] ?? "test-mcp",
+		mcpToolName: name.split("__").at(-1) ?? name,
+		async execute() {
+			return { content: [{ type: "text", text: "ok" }] };
 		},
 	};
 }
@@ -112,6 +137,8 @@ describe("AgentSession plan-mode convergence", () => {
 			advisorResponses?: MockResponse[];
 			sideResponses?: MockResponse[];
 			planYolo?: boolean;
+			initialPlanTools?: string[];
+			xdev?: boolean;
 			rebuildGate?: { fail: boolean };
 		},
 	): Promise<PlanHarness> {
@@ -121,20 +148,38 @@ describe("AgentSession plan-mode convergence", () => {
 		const askTool = makeTool("ask");
 		const writeTool = makeTool("write");
 		const readTool = makeTool("read");
+		const toolRegistry = new Map<string, AgentTool>([
+			["ask", askTool],
+			["write", writeTool],
+			["read", readTool],
+		]);
+		const initialTools = options?.planYolo
+			? options.initialPlanTools?.includes("write")
+				? [readTool, writeTool]
+				: [readTool]
+			: [askTool, writeTool, readTool];
+		let currentAgent: Agent | undefined;
+		const xdev: XdevState | undefined = options?.xdev
+			? {
+					tools: toolRegistry,
+					mountedNames: new Set<string>(),
+					builtInNames: new Set(["ask", "write", "read"]),
+					isActive: name => currentAgent?.state.tools.some(tool => tool.name === name) ?? false,
+				}
+			: undefined;
 
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			// All three tools active so a scripted ask/write/read call (and a
-			// forced "required" choice) can actually execute (isToolChoiceActive).
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: options?.planYolo ? [readTool] : [askTool, writeTool, readTool],
+				tools: initialTools,
 				messages: [],
 			},
 			streamFn: mock.stream,
 		});
+		currentAgent = agent;
 
 		let advisorMock: MockModel | undefined;
 		let advisorStreamFn: StreamFn | undefined;
@@ -158,16 +203,13 @@ describe("AgentSession plan-mode convergence", () => {
 				"retry.enabled": false,
 			}),
 			modelRegistry,
-			toolRegistry: new Map<string, AgentTool>([
-				["ask", askTool],
-				["write", writeTool],
-				["read", readTool],
-			]),
+			toolRegistry,
 			builtInToolNames: ["ask", "write", "read"],
 			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
+			xdev,
 			rebuildSystemPrompt: options?.rebuildGate
 				? async () => {
 						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
@@ -345,6 +387,108 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("retains MCP devices discovered while PlanYolo is active", async () => {
+		const harness = await createPlanSession(
+			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
+			{ planYolo: true, initialPlanTools: ["read", "write"], xdev: true },
+		);
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		const chromeTool = makeMcpTool("mcp__chrome_devtools_list_pages", "discoverable");
+		const contextTool = makeMcpTool("mcp__context_query_docs", "essential");
+		await harness.session.refreshMCPTools([chromeTool, contextTool]);
+		expect(harness.session.getSelectedMCPToolNames()).toEqual([
+			"mcp__context_query_docs",
+			"mcp__chrome_devtools_list_pages",
+		]);
+		expect(harness.session.getActiveToolNames()).toContain("mcp__context_query_docs");
+		expect(harness.session.getMountedXdevToolNames()).toContain("mcp__chrome_devtools_list_pages");
+
+		const planPath = resolveLocalUrlToPath("local://mcp-devices-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# MCP devices plan\n\nKeep the connected devices.\n");
+		const handler = harness.session.peekPlanProposalHandler();
+		if (!handler) throw new Error("Expected PlanYolo proposal handler");
+		await handler("mcp-devices");
+
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "write", "mcp__context_query_docs"]);
+		expect(harness.session.getMountedXdevToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getSelectedMCPToolNames()).toEqual([
+			"mcp__context_query_docs",
+			"mcp__chrome_devtools_list_pages",
+		]);
+	});
+
+	it("serializes PlanYolo restoration after a pending MCP refresh", async () => {
+		const harness = await createPlanSession(
+			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
+			{ planYolo: true, initialPlanTools: ["read", "write"], xdev: true },
+		);
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const blocker = harness.session.runToolRegistryMutation(async () => {
+			entered.resolve();
+			await release.promise;
+		});
+		await entered.promise;
+
+		const chromeTool = makeMcpTool("mcp__chrome_devtools_list_pages", "discoverable");
+		const refresh = harness.session.refreshMCPTools([chromeTool]);
+		const planPath = resolveLocalUrlToPath("local://queued-mcp-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# Queued MCP plan\n\nKeep the connected device.\n");
+		const handler = harness.session.peekPlanProposalHandler();
+		if (!handler) throw new Error("Expected PlanYolo proposal handler");
+		const approval = handler("queued-mcp");
+		release.resolve();
+		await Promise.all([blocker, refresh, approval]);
+
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toContain("read");
+		expect(harness.session.getActiveToolNames()).toContain("write");
+		expect(harness.session.getMountedXdevToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getSelectedMCPToolNames()).toContain("mcp__chrome_devtools_list_pages");
+	});
+
+	it("preserves late MCP selection without leaking plan-only write", async () => {
+		const harness = await createPlanSession(
+			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
+			{ planYolo: true, xdev: true },
+		);
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		const chromeTool = makeMcpTool("mcp__chrome_devtools_list_pages", "discoverable", "write");
+		await harness.session.refreshMCPTools([chromeTool]);
+		const registeredTool = harness.session.getToolByName("mcp__chrome_devtools_list_pages");
+		expect(registeredTool).toBeDefined();
+
+		const planPath = resolveLocalUrlToPath("local://read-only-mcp-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# Read-only MCP plan\n\nKeep the selected device.\n");
+		const handler = harness.session.peekPlanProposalHandler();
+		if (!handler) throw new Error("Expected PlanYolo proposal handler");
+		await handler("read-only-mcp");
+
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getActiveToolNames()).not.toContain("write");
+		expect(harness.session.getMountedXdevToolNames()).toEqual([]);
+		expect(harness.session.getSelectedMCPToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getToolByName("mcp__chrome_devtools_list_pages")).toBe(registeredTool);
 	});
 
 	it("keeps PlanYolo retryable when pre-plan tool restoration fails", async () => {

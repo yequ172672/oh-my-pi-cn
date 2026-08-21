@@ -19,8 +19,8 @@ import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo, SessionStatus } from "../../session/session-listing";
 import { shortenPath } from "../../tools/render-utils";
-import { DynamicBorder } from "./dynamic-border";
 import { HookSelectorComponent } from "./hook-selector";
+import { bottomBorder, OverlayPanel, row, topBorder } from "./overlay-box";
 
 /**
  * Themed glyph + colored label for a session's lifecycle status, or `undefined`
@@ -330,22 +330,26 @@ class SessionList implements Component {
 	}
 
 	/**
-	 * Number of sessions to show at once, sized so the whole picker fits the
-	 * current viewport instead of pushing its header/search off the top.
+	 * Session-row line budget for one render, sized so the whole picker fits
+	 * the current viewport instead of pushing its header/search off the top.
 	 *
-	 * Budget = rows − chrome − reserve, divided by the worst-case per-session
-	 * height. Chrome (12) is the surrounding spacers/borders/header (7) plus the
-	 * list's search line, blank, scroll indicator, blank, and hint (5). A titled
-	 * session is the tallest item at 4 lines (title + preview + metadata +
-	 * blank); budgeting for that guarantees no overflow even when every visible
-	 * entry has a title. The reserve covers below-editor hook widgets / cursor.
+	 * Chrome (7) is the panel's top border, one spacer, the list's search line
+	 * and its blank, and the pinned footer minus its leading blank (hint,
+	 * blank, bottom border) — the last visible session's separator blank is
+	 * never rendered, so the footer's own blank stands in for it. The reserve
+	 * covers below-editor hook widgets / cursor. The floor of 8 always admits
+	 * two titled sessions (the tallest item at 4 lines: title + preview +
+	 * metadata + separator).
 	 */
-	#visibleCount(): number {
-		const CHROME = 12;
-		const PER_SESSION = 4;
+	#lineBudget(): number {
+		const CHROME = 7;
 		const RESERVE = 1;
-		const budget = this.#getTerminalRows() - CHROME - RESERVE;
-		return Math.max(2, Math.floor(budget / PER_SESSION));
+		return Math.max(8, this.#getTerminalRows() - CHROME - RESERVE);
+	}
+
+	/** PageUp/PageDown jump, approximated from the worst-case session height. */
+	#pageSize(): number {
+		return Math.max(2, Math.floor(this.#lineBudget() / 4));
 	}
 
 	/** Replace the visible dataset, e.g. when toggling folder/all-projects scope. */
@@ -529,12 +533,11 @@ class SessionList implements Component {
 
 		if (this.#filteredSessions.length === 0) {
 			if (this.#showCwd) {
-				// "All" scope - no sessions anywhere that match filter
-				lines.push(truncateToWidth(theme.fg("muted", "  No sessions found"), width));
+				lines.push(truncateToWidth(theme.fg("muted", "No sessions found"), width));
 			} else {
 				// "Current folder" scope - hint to try "all"
 				lines.push(
-					truncateToWidth(theme.fg("muted", "  No sessions in current folder. Press Tab to view all."), width),
+					truncateToWidth(theme.fg("muted", "No sessions in current folder. Press Tab to view all."), width),
 				);
 			}
 			return lines;
@@ -557,21 +560,36 @@ class SessionList implements Component {
 			return date.toLocaleDateString();
 		};
 
-		// Calculate visible range with scrolling. The window is sized to the
-		// current viewport so the picker never overflows past the top.
-		const maxVisible = this.#visibleCount();
-		const startIndex = Math.max(
-			0,
-			Math.min(this.#selectedIndex - Math.floor(maxVisible / 2), this.#filteredSessions.length - maxVisible),
-		);
-		const endIndex = Math.min(startIndex + maxVisible, this.#filteredSessions.length);
+		// Pack the window around the selection by actual line height (3 lines
+		// per session, 4 when a title adds a preview line) until the viewport
+		// budget is spent, so short sessions never strand blank rows a
+		// worst-case count-based window would leave (then padded by
+		// fill-height).
+		const filtered = this.#filteredSessions;
+		const itemHeight = (session: SessionInfo): number => (session.title ? 4 : 3);
+		const budget = this.#lineBudget();
+		let startIndex = this.#selectedIndex;
+		let endIndex = this.#selectedIndex + 1;
+		let used = itemHeight(filtered[this.#selectedIndex]!);
+		// Alternate growth below/above the selection to keep it roughly centered.
+		for (let preferDown = true; ; preferDown = !preferDown) {
+			const canDown = endIndex < filtered.length && used + itemHeight(filtered[endIndex]!) <= budget;
+			const canUp = startIndex > 0 && used + itemHeight(filtered[startIndex - 1]!) <= budget;
+			if (!canDown && !canUp) break;
+			if (canDown && (preferDown || !canUp)) {
+				used += itemHeight(filtered[endIndex]!);
+				endIndex++;
+			} else {
+				startIndex--;
+				used += itemHeight(filtered[startIndex]!);
+			}
+		}
 
-		// Render visible sessions (3 lines, or 4 when a title adds a preview line).
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.
 		const sessionLines: string[] = [];
 		const sessionRowIndex: number[] = [];
-		const overflow = this.#filteredSessions.length > maxVisible;
+		const overflow = startIndex > 0 || endIndex < filtered.length;
 		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
 		for (let i = startIndex; i < endIndex; i++) {
 			const blockStart = sessionLines.length;
@@ -623,20 +641,31 @@ class SessionList implements Component {
 			const metadataLine = truncateToWidth(metadata, rowWidth);
 
 			sessionLines.push(metadataLine);
-			sessionLines.push(""); // Blank line between sessions
+			// Blank separator between sessions; the last block ends flush against
+			// the footer, whose leading blank provides the same gap.
+			if (i < endIndex - 1) sessionLines.push("");
 			for (let k = blockStart; k < sessionLines.length; k++) sessionRowIndex[k] = i;
 		}
 
-		// Wrap the rendered window in a ScrollView for a proportional right-edge bar.
-		const visibleCount = endIndex - startIndex;
-		const linesPerItem = visibleCount > 0 ? sessionLines.length / visibleCount : 1;
+		// Wrap the rendered window in a ScrollView for a proportional right-edge
+		// bar, with exact physical-line totals from the per-session heights.
+		let totalRows = 0;
+		let offsetRows = 0;
+		for (let i = 0; i < filtered.length; i++) {
+			if (i === startIndex) offsetRows = totalRows;
+			totalRows += itemHeight(filtered[i]!);
+		}
+		// The last session's separator blank is never rendered (see the block
+		// loop above), so exclude it or a fully visible list would still show a
+		// scrollbar.
+		totalRows -= 1;
 		const sv = new ScrollView(sessionLines, {
 			height: sessionLines.length,
 			scrollbar: "auto",
-			totalRows: Math.round(this.#filteredSessions.length * linesPerItem),
+			totalRows,
 			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
 		});
-		sv.setScrollOffset(Math.round(startIndex * linesPerItem));
+		sv.setScrollOffset(offsetRows);
 		const sessionRegionStart = lines.length;
 		const svLines = sv.render(width);
 		for (let k = 0; k < svLines.length; k++) this.#hitRows[sessionRegionStart + k] = sessionRowIndex[k];
@@ -678,13 +707,13 @@ class SessionList implements Component {
 		// Page up - jump up by maxVisible items
 		if (matchesKey(keyData, "pageUp")) {
 			this.#selectionMoved = true;
-			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.#visibleCount());
+			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.#pageSize());
 			return;
 		}
 		// Page down - jump down by maxVisible items
 		if (matchesKey(keyData, "pageDown")) {
 			this.#selectionMoved = true;
-			this.#selectedIndex = Math.min(this.#filteredSessions.length - 1, this.#selectedIndex + this.#visibleCount());
+			this.#selectedIndex = Math.min(this.#filteredSessions.length - 1, this.#selectedIndex + this.#pageSize());
 			return;
 		}
 		// Enter
@@ -748,7 +777,7 @@ export interface SessionSelectorOptions {
 /**
  * Component that renders a session selector with optional confirmation dialog
  */
-export class SessionSelectorComponent extends Container {
+export class SessionSelectorComponent extends OverlayPanel {
 	#sessionList: SessionList;
 	#confirmationDialog: HookSelectorComponent | null = null;
 	// Hosts whichever of `#sessionList` / `#confirmationDialog` is live this
@@ -759,7 +788,6 @@ export class SessionSelectorComponent extends Container {
 	// scrollback, stranding it above the viewport once the dialog closed).
 	#contentSlot: Container;
 	#messageContainer: Container;
-	#headerText: Text;
 	#onDelete?: (session: SessionInfo) => Promise<boolean>;
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<SessionInfo[]>;
@@ -779,7 +807,6 @@ export class SessionSelectorComponent extends Container {
 	#footerStart = 0;
 	readonly #getTerminalRows: () => number;
 	readonly #fillHeight: boolean;
-	readonly #bottomBorder = new DynamicBorder();
 	readonly #title: string;
 	readonly #scopeLabel: string | false | undefined;
 
@@ -790,7 +817,7 @@ export class SessionSelectorComponent extends Container {
 		onExit: () => void,
 		options: SessionSelectorOptions = {},
 	) {
-		super();
+		super(localizeUiText(options.title ?? "Resume Session"));
 
 		this.#messageContainer = new Container();
 		this.#onDelete = options.onDelete;
@@ -799,14 +826,11 @@ export class SessionSelectorComponent extends Container {
 		this.#globalSessions = options.allSessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
-		this.#title = options.title ?? "Resume Session";
+		this.#title = localizeUiText(options.title ?? "Resume Session");
 		this.#scopeLabel = options.scopeLabel;
-		// Add header
-		this.addChild(new Spacer(1));
-		this.#headerText = new Text(this.#headerLabel(), 1, 0);
-		this.addChild(this.#headerText);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.title = this.#headerLabel();
+		// One spacer of breathing room; OverlayPanel supplies the two outer
+		// border rows and the horizontal inset.
 		this.addChild(new Spacer(1));
 		this.addChild(this.#messageContainer);
 		// Create session list in folder scope; the empty-state hint invites the
@@ -847,9 +871,9 @@ export class SessionSelectorComponent extends Container {
 	}
 
 	#headerLabel(): string {
-		if (this.#scopeLabel === false) return theme.bold(this.#title);
+		if (this.#scopeLabel === false) return this.#title;
 		const scopeLabel = this.#scopeLabel ?? localizeUiText(this.#scope === "all" ? "all projects" : "current folder");
-		return `${theme.bold(this.#title)} ${theme.fg("muted", `(${scopeLabel})`)}`;
+		return `${this.#title} (${scopeLabel})`;
 	}
 
 	/**
@@ -865,9 +889,7 @@ export class SessionSelectorComponent extends Container {
 				if (!this.#loadAllSessions) return;
 				this.#toggling = true;
 				this.#messageContainer.clear();
-				this.#messageContainer.addChild(
-					new Text(theme.fg("muted", `  ${localizeUiText("Loading all projects…")}`), 1, 0),
-				);
+				this.#messageContainer.addChild(new Text(theme.fg("muted", localizeUiText("Loading all projects…")), 0, 0));
 				this.#onRequestRender?.();
 				try {
 					global = await this.#loadAllSessions();
@@ -887,7 +909,7 @@ export class SessionSelectorComponent extends Container {
 			this.#scope = "folder";
 			this.#sessionList.setSessions(this.#folderSessions, false);
 		}
-		this.#headerText.setText(this.#headerLabel());
+		this.title = this.#headerLabel();
 		this.#onRequestRender?.();
 	}
 
@@ -919,7 +941,7 @@ export class SessionSelectorComponent extends Container {
 
 	#showError(message: string): void {
 		this.#messageContainer.clear();
-		this.#messageContainer.addChild(new Text(theme.fg("error", `Error: ${replaceTabs(message)}`), 1, 0));
+		this.#messageContainer.addChild(new Text(theme.fg("error", `Error: ${replaceTabs(message)}`), 0, 0));
 		this.#messageContainer.addChild(new Spacer(1));
 	}
 
@@ -964,28 +986,23 @@ export class SessionSelectorComponent extends Container {
 	}
 
 	/**
-	 * Concatenate the children's renders (like {@link Container}) while recording
-	 * the line where the session list begins, so the fullscreen picker can hit-
-	 * test mouse rows against the live list window. SessionList rebuilds its lines
-	 * every frame, so Container's reference-memoization never applied here.
-	 *
-	 * In fill-height mode the body is padded (or, on a cramped terminal, trimmed)
-	 * to leave exactly enough room for the footer at the screen bottom, so the
-	 * footer is always visible and never drifts as the list window resizes. The
-	 * in-editor selector just appends the footer directly.
+	 * Render the panel directly so fill-height mode can keep its footer pinned
+	 * while sharing OverlayPanel's exact rounded-box chrome. Children receive
+	 * the panel's inner width before their rows are wrapped.
 	 */
 	override render(width: number): readonly string[] {
-		const lines: string[] = [];
+		const innerWidth = Math.max(1, width - 4);
+		const lines: string[] = [topBorder(width, this.title)];
 		for (const child of this.children) {
-			const childLines = child.render(width);
+			const childLines = child.render(innerWidth);
 			if (child === this.#contentSlot) this.#listLineOffset = lines.length;
-			for (const line of childLines) lines.push(line);
+			for (const line of childLines) lines.push(row(line, width));
 		}
 		const footer = this.#footerLines(width);
 		if (this.#fillHeight) {
 			const target = Math.max(0, this.#getTerminalRows() - footer.length);
 			if (lines.length > target) lines.length = target;
-			else for (let i = lines.length; i < target; i++) lines.push("");
+			else for (let i = lines.length; i < target; i++) lines.push(row("", width));
 		}
 		this.#footerStart = lines.length;
 		for (const line of footer) lines.push(line);
@@ -995,8 +1012,8 @@ export class SessionSelectorComponent extends Container {
 	/** Blank · keybinding hint · bottom border. Rendered by {@link render}. */
 	#footerLines(width: number): string[] {
 		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
-		const hint = theme.fg("muted", `  [Del/⌫ delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
-		return ["", hint, "", ...this.#bottomBorder.render(width)];
+		const hint = theme.fg("muted", `[Del/⌫ delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
+		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
 
 	handleInput(keyData: string): void {

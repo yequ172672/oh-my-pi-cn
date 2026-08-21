@@ -35,6 +35,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
 import type {
+	ContextLineMode,
 	SettingTab,
 	StatusLinePreset,
 	StatusLineSegmentId,
@@ -45,6 +46,8 @@ import { localizeUiText } from "../../i18n";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
+import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
+import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
@@ -248,7 +251,8 @@ class MultiSelectSubmenu extends Container {
 	#value: string[];
 	#cursor = 0;
 	#selectListLineOffset = 0;
-
+	#pressedItemId: string | undefined;
+	#dropItemId: string | undefined;
 	constructor(
 		private readonly title: string,
 		private readonly description: string,
@@ -294,8 +298,8 @@ class MultiSelectSubmenu extends Container {
 
 		this.addChild(new Spacer(1));
 		const hint = this.ordered
-			? `  ${localizeUiText("Enter/Space to toggle · ←/→ move · 1-9 place at position · Esc to go back")}`
-			: `  ${localizeUiText("Enter/Space to toggle · Esc to go back")}`;
+			? `  ${localizeUiText("Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back")}`
+			: `  ${localizeUiText("Click/Enter/Space to toggle · Esc to go back")}`;
 		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 	}
 
@@ -321,6 +325,16 @@ class MultiSelectSubmenu extends Container {
 		this.#apply(next);
 	}
 
+	/** Move a selected item before another selected item, retaining every other preference. */
+	#moveBefore(id: string, beforeId: string): void {
+		if (id === beforeId) return;
+		const next = this.#value.filter(value => value !== id);
+		const target = next.indexOf(beforeId);
+		if (target === -1) return;
+		next.splice(target, 0, id);
+		this.#apply(next);
+	}
+
 	/** Splice the option into the 1-based `position` of the selection (adding it if unselected). */
 	#placeAt(id: string, position: number): void {
 		const next = this.#value.filter(v => v !== id);
@@ -342,7 +356,46 @@ class MultiSelectSubmenu extends Container {
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
+		const itemIndex = this.#selectList.hitTest(line - this.#selectListLineOffset);
+		if (event.wheel !== null) {
+			routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
+			return;
+		}
+		if (event.motion) {
+			this.#selectList.setHoverIndex(itemIndex ?? null);
+			const target = itemIndex === undefined ? undefined : this.options[itemIndex]?.value;
+			if (
+				this.ordered &&
+				this.#pressedItemId !== undefined &&
+				target !== undefined &&
+				target !== this.#pressedItemId &&
+				this.#value.includes(target)
+			) {
+				this.#dropItemId = target;
+			}
+			return;
+		}
+		if (event.leftClick && itemIndex !== undefined) {
+			const item = this.options[itemIndex];
+			if (!item) return;
+			this.#cursor = itemIndex;
+			this.#selectList.setSelectedIndex(itemIndex);
+			this.#pressedItemId = item.value;
+			this.#dropItemId = item.value;
+			return;
+		}
+		if (!event.release) return;
+
+		const pressedItemId = this.#pressedItemId;
+		const dropItemId = this.#dropItemId;
+		this.#pressedItemId = undefined;
+		this.#dropItemId = undefined;
+		if (!pressedItemId) return;
+		if (this.ordered && dropItemId !== undefined && dropItemId !== pressedItemId) {
+			this.#moveBefore(pressedItemId, dropItemId);
+			return;
+		}
+		this.#toggle(pressedItemId);
 	}
 
 	handleInput(data: string): void {
@@ -534,11 +587,14 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** Live status renderer for composer-shape previews (the session's status line). */
+	composerPreviewStatus?: ComposerPreviewStatusSource;
 }
 
 /** Status line settings subset for preview */
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
+	contextLine?: ContextLineMode;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
@@ -977,73 +1033,61 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const currentValue = this.#getCurrentValue(def);
-		const changed = this.#isChanged(def, currentValue);
+		const item = {
+			id: def.path,
+			label: def.label,
+			description: def.description,
+			warning: def.warning,
+			changed: this.#isChanged(def, currentValue),
+		};
 
 		switch (def.type) {
 			case "boolean":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: currentValue ? "true" : "false",
 					values: ["true", "false"],
 					valueLabels: buildSettingValueLabels(["true", "false"]),
-					changed,
 				};
 
 			case "enum":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: String(currentValue ?? ""),
 					values: [...def.values],
 					valueLabels: buildSettingValueLabels(def.values),
-					changed,
 				};
 
 			case "submenu":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
 					valueLabels: buildSettingValueLabels(
 						[String(currentValue ?? ""), ...def.options.map(option => option.value)],
 						def.options,
 					),
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
-					changed,
 				};
 
 			case "text":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#formatTextInputValue(def, currentValue),
 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
-					changed,
 				};
 
 			case "providerLimits":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#formatProviderLimitsValue(currentValue),
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
-					changed,
 				};
 
 			case "multiselect":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#formatMultiSelectValue(def, currentValue),
 					submenu: (_cv, done) => this.#createMultiSelect(def, done),
-					changed,
 				};
 		}
 	}
@@ -1097,8 +1141,9 @@ export class SettingsSelectorComponent implements Component {
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
+		} else if (def.path === "composer.shape") {
+			options = getComposerShapeOptions();
 		}
-
 		// Preview handlers
 		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
@@ -1142,6 +1187,13 @@ export class SettingsSelectorComponent implements Component {
 				const separator = settings.get("statusLine.separator");
 				this.callbacks.onStatusLinePreview?.({ separator });
 			};
+		} else if (def.path === "statusLine.contextLine") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: value as ContextLineMode });
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
+			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
 				model: this.context.model,
@@ -1150,8 +1202,14 @@ export class SettingsSelectorComponent implements Component {
 			});
 			onPreview = value => shapePreview.setValue(value);
 			footer = shapePreview;
+		} else if (def.path === "composer.shape") {
+			const shapePreview = new ComposerShapePreview(String(currentValue ?? "box"), {
+				requestRender: this.context.requestRender,
+				status: this.context.composerPreviewStatus,
+			});
+			onPreview = value => shapePreview.setValue(value);
+			footer = shapePreview;
 		}
-
 		// Provide status line preview for theme selection
 		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
@@ -1224,15 +1282,15 @@ export class SettingsSelectorComponent implements Component {
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
 	}
 
-	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
-		let options = def.options;
-		if (def.path === "providers.webSearchOrder") {
-			const excluded: unknown = settings.get("providers.webSearchExclude");
-			if (Array.isArray(excluded)) {
-				options = options.filter(option => !excluded.includes(option.value));
-			}
-		}
+	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {
+		if (def.path !== "providers.webSearchOrder") return def.options;
+		const excluded: unknown = settings.get("providers.webSearchExclude");
+		if (!Array.isArray(excluded)) return def.options;
+		return def.options.filter(option => !excluded.includes(option.value));
+	}
 
+	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
+		const options = this.#getMultiSelectOptions(def);
 		const current: unknown = settings.get(def.path);
 		const initial = Array.isArray(current)
 			? current.filter((entry): entry is string => typeof entry === "string")
@@ -1252,9 +1310,15 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#formatMultiSelectValue(def: SettingDef & { type: "multiselect" }, value: unknown): string {
-		const ids = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-		if (ids.length === 0) return def.ordered ? "default" : "none";
-		const labels = ids.map(id => def.options.find(option => option.value === id)?.label ?? id);
+		const options = this.#getMultiSelectOptions(def);
+		const labels = Array.isArray(value)
+			? value.flatMap(entry => {
+					if (typeof entry !== "string") return [];
+					const option = options.find(candidate => candidate.value === entry);
+					return option ? [option.label] : [];
+				})
+			: [];
+		if (labels.length === 0) return def.ordered ? "default" : "none";
 		return def.ordered ? labels.join(" → ") : labels.join(", ");
 	}
 
@@ -1411,6 +1475,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#pluginComponent = new PluginSettingsComponent(this.context.cwd, {
 			onClose: () => this.callbacks.onCancel(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
+			requestRender: this.context.requestRender,
 		});
 	}
 

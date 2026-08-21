@@ -849,4 +849,43 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(result).toMatchObject({ refreshed: false, removed: false });
 		expect(result.credential).toMatchObject({ type: "oauth", access: "peer-rotated-access" });
 	});
+
+	test("stops after a definitive refresh failure loses its disable CAS", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("unit-oauth-definitive-cas-loss", [
+			{
+				type: "oauth",
+				access: "access-old",
+				refresh: "refresh-old",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const controller = new AbortController();
+		let refreshCalls = 0;
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-definitive-cas-loss",
+			name: "Unit OAuth Definitive CAS Loss",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: Date.now() + 60 * 60_000 };
+			},
+			async refreshToken() {
+				refreshCalls += 1;
+				if (refreshCalls > 1) controller.abort(new Error("unexpected retry"));
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		vi.spyOn(store, "tryDisableAuthCredentialIfMatches").mockReturnValue(false);
+
+		await expect(
+			authStorage.getApiKey("unit-oauth-definitive-cas-loss", "session-cas-loss", {
+				signal: controller.signal,
+			}),
+		).resolves.toBeUndefined();
+		expect(refreshCalls).toBe(1);
+	});
 });

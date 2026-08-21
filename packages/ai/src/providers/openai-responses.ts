@@ -99,6 +99,7 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
+	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
 
@@ -1274,6 +1275,10 @@ export function buildParams(
 				}
 			}
 		}
+	}
+
+	if (shouldDropAutoToolChoiceForReasoning(model, model.compat, params.tool_choice, options)) {
+		delete params.tool_choice;
 	}
 
 	const reasoningPolicy = resolveOpenAICompatPolicy(model, {

@@ -286,6 +286,69 @@ test(".mcp.json with bare entries (no command/url) records a warning and is skip
 	expect((result.warnings ?? []).some(w => w.includes('"broken"'))).toBe(true);
 });
 
+test(".mcp.json expands environment placeholders recursively", async () => {
+	const variables = {
+		OMP_PLUGIN_COMMAND: "expanded-command",
+		OMP_PLUGIN_ARG: "expanded-arg",
+		OMP_PLUGIN_ENV: "expanded-env",
+		OMP_PLUGIN_CWD: path.join(tempDir, "expanded-cwd"),
+		OMP_PLUGIN_URL: "https://mcp.example.test",
+		OMP_PLUGIN_HEADER: "expanded-header",
+		OMP_PLUGIN_CLIENT_ID: "expanded-client-id",
+	};
+	const placeholder = (name: string) => `\${${name}}`;
+	Object.assign(process.env, variables);
+	try {
+		writeFile(
+			path.join(ext, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					stdio: {
+						command: placeholder("OMP_PLUGIN_COMMAND"),
+						args: [placeholder("OMP_PLUGIN_ARG")],
+						env: { TOKEN: placeholder("OMP_PLUGIN_ENV") },
+						cwd: placeholder("OMP_PLUGIN_CWD"),
+					},
+					http: {
+						type: "http",
+						url: placeholder("OMP_PLUGIN_URL"),
+						headers: { Authorization: `Bearer ${placeholder("OMP_PLUGIN_HEADER")}` },
+						oauth: { clientId: placeholder("OMP_PLUGIN_CLIENT_ID") },
+					},
+				},
+			}),
+		);
+		writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+		const servers = await loadFromPlugin<{
+			name: string;
+			command?: string;
+			args?: string[];
+			env?: Record<string, string>;
+			cwd?: string;
+			url?: string;
+			headers?: Record<string, string>;
+			oauth?: { clientId?: string };
+		}>(mcpCapability.id, ctx());
+		const stdio = servers.find(server => server.name === "stdio");
+		const http = servers.find(server => server.name === "http");
+
+		expect(stdio).toMatchObject({
+			command: variables.OMP_PLUGIN_COMMAND,
+			args: [variables.OMP_PLUGIN_ARG],
+			env: { TOKEN: variables.OMP_PLUGIN_ENV },
+			cwd: variables.OMP_PLUGIN_CWD,
+		});
+		expect(http).toMatchObject({
+			url: variables.OMP_PLUGIN_URL,
+			headers: { Authorization: `Bearer ${variables.OMP_PLUGIN_HEADER}` },
+			oauth: { clientId: variables.OMP_PLUGIN_CLIENT_ID },
+		});
+	} finally {
+		for (const key of Object.keys(variables)) delete process.env[key];
+	}
+});
+
 test("relative path-like command and cwd resolve against the plugin config directory", async () => {
 	writeFile(
 		path.join(ext, ".mcp.json"),
